@@ -6,16 +6,14 @@ Priority: PubMed → arXiv → bioRxiv → CrossRef → HTML.
 import logging
 import re
 import warnings
+from datetime import date
 
 import arxiv
 import httpx
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
-from larklab.extract.abstract_fetcher import (
-    clean_crossref_abstract,
-    pubmed_efetch,
-    pubmed_esearch,
-)
+from larklab.extract.abstract_fetcher import pubmed_efetch, pubmed_esearch
+from larklab.extract.normalizers import clean_biorxiv_abstract, clean_crossref_abstract
 from larklab.schemas import Paper
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -43,6 +41,38 @@ def _make_paper(
     )
 
 
+def paper_from_arxiv_result(r: arxiv.Result) -> Paper:
+    """Convert an arxiv.Result to a Paper."""
+    arxiv_id = r.get_short_id().split("v")[0]
+    pub = r.published.date() if r.published else None
+    return Paper(
+        title=r.title.replace("\n", " "),
+        authors=[a.name for a in r.authors],
+        journal="arXiv",
+        abstract=r.summary.replace("\n", " "),
+        doi=r.doi or f"10.48550/arXiv.{arxiv_id}",
+        published_date=pub,
+    )
+
+
+def paper_from_biorxiv_entry(entry: dict) -> Paper:
+    """Convert a bioRxiv API collection entry to a Paper."""
+    pub = None
+    if entry.get("date"):
+        try:
+            pub = date.fromisoformat(entry["date"])
+        except ValueError:
+            pass
+    return Paper(
+        title=entry.get("title", "").strip(),
+        authors=[a.strip() for a in entry.get("authors", "").split(";")],
+        journal=entry.get("server", "biorxiv").capitalize(),
+        abstract=clean_biorxiv_abstract(entry.get("abstract", "")),
+        doi=entry.get("doi", ""),
+        published_date=pub,
+    )
+
+
 def fetch_paper(doi: str, url: str = "") -> Paper:
     """Fetch paper metadata by DOI. Falls back to URL if DOI unavailable.
 
@@ -55,14 +85,26 @@ def fetch_paper(doi: str, url: str = "") -> Paper:
             return result
 
     if doi and doi.startswith("10.48550/arXiv"):
-        return _fetch_from_arxiv_api(doi)
-    if url and "arxiv.org" in url:
-        return _fetch_from_arxiv_api(url)
+        result = _fetch_from_arxiv_api(doi)
+        if result and result.title:
+            return result
+        if not url:
+            match = re.search(r"(\d{4}\.\d{4,5})", doi)
+            if match:
+                url = f"https://arxiv.org/abs/{match.group(1)}"
+    elif url and "arxiv.org" in url:
+        result = _fetch_from_arxiv_api(url)
+        if result and result.title:
+            return result
 
     if doi and doi.startswith("10.1101/"):
-        return _fetch_from_biorxiv_api(doi)
-    if url and ("biorxiv.org" in url or "medrxiv.org" in url):
-        return _fetch_from_biorxiv_api(url)
+        result = _fetch_from_biorxiv_api(doi)
+        if result and result.title:
+            return result
+    elif url and ("biorxiv.org" in url or "medrxiv.org" in url):
+        result = _fetch_from_biorxiv_api(url)
+        if result and result.title:
+            return result
 
     if doi:
         result = _fetch_from_crossref(doi)
@@ -140,6 +182,12 @@ def _fetch_from_html(url: str, doi: str | None) -> Paper:
     journal = ""
     if journal_tag and journal_tag.get("content"):
         journal = journal_tag["content"].strip()
+    elif "arxiv.org" in url:
+        journal = "arXiv"
+    elif "biorxiv.org" in url:
+        journal = "bioRxiv"
+    elif "medrxiv.org" in url:
+        journal = "medRxiv"
 
     if not doi:
         doi_tag = soup.find("meta", attrs={"name": "citation_doi"})
@@ -212,22 +260,20 @@ def _fetch_from_arxiv_api(url: str) -> Paper:
         return _make_paper()
 
     arxiv_id = match.group(1)
-    client = arxiv.Client()
-    search = arxiv.Search(id_list=[arxiv_id])
-    results = list(client.results(search))
+    doi = f"10.48550/arXiv.{arxiv_id}"
+    try:
+        client = arxiv.Client()
+        search = arxiv.Search(id_list=[arxiv_id])
+        results = list(client.results(search))
 
-    if not results:
-        logger.debug("No results from arXiv API for %s", arxiv_id)
-        return _make_paper()
+        if not results:
+            logger.debug("No results from arXiv API for %s", arxiv_id)
+            return _make_paper(doi=doi)
 
-    r = results[0]
-    return _make_paper(
-        title=r.title,
-        authors=[a.name for a in r.authors],
-        journal="arXiv",
-        abstract=r.summary.replace("\n", " "),
-        doi=r.doi or f"10.48550/arXiv.{arxiv_id}",
-    )
+        return paper_from_arxiv_result(results[0])
+    except (arxiv.HTTPError, arxiv.UnexpectedEmptyPageError) as e:
+        logger.debug("arXiv API failed for %s: %s", arxiv_id, e)
+        return _make_paper(doi=doi)
 
 
 def _fetch_from_biorxiv_api(url: str) -> Paper:
@@ -248,19 +294,9 @@ def _fetch_from_biorxiv_api(url: str) -> Paper:
             logger.debug("No results from bioRxiv API for %s", doi)
             return _make_paper(doi=doi)
 
-        p = data["collection"][-1]
-        abstract = p.get("abstract", "")
-        abstract = re.sub(r"[A-Z]+_SCPLOW[A-Z]*C_SCPLOW", "", abstract)
-        abstract = re.sub(r"\d+$", "", abstract)
-        abstract = abstract.strip()
-
-        return _make_paper(
-            title=p.get("title", "").strip(),
-            authors=[a.strip() for a in p.get("authors", "").split(";")],
-            journal=p.get("server", "biorxiv").capitalize(),
-            abstract=abstract,
-            doi=doi,
-        )
+        paper = paper_from_biorxiv_entry(data["collection"][-1])
+        paper.doi = doi
+        return paper
     except (httpx.HTTPError, KeyError, ValueError) as e:
         logger.debug("bioRxiv fetch failed for %s: %s", url, e)
         return _make_paper(doi=doi)

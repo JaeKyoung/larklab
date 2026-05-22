@@ -3,7 +3,7 @@ import click
 from larklab.cli.common import CONTEXT_SETTINGS
 from larklab.config import load_config
 from larklab.extract.gmail_client import GmailClient
-from larklab.load.slack import send_digest_to_slack
+from larklab.load.slack_digest import send_digest_to_slack
 from larklab.load.terminal import print_digest
 from larklab.pipeline import run_digest_pipeline
 

@@ -11,6 +11,7 @@ from larklab.cli.paper import (
     list_papers,
     search_paper,
 )
+from larklab.cli.recommend import recommend
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)
@@ -25,6 +26,7 @@ cli.add_command(check_papers)
 cli.add_command(delete_paper)
 cli.add_command(list_papers)
 cli.add_command(search_paper)
+cli.add_command(recommend)
 cli.add_command(export_papers)
 cli.add_command(import_papers)
 cli.add_command(rebuild_embeddings)

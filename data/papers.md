@@ -1,4 +1,4 @@
-# Reference Papers (36)
+# Reference Papers (40)
 
 - [Accurate structure prediction of biomolecular interactions with AlphaFold 3.](https://doi.org/10.1038/s41586-024-07487-w)
   - DOI: 10.1038/s41586-024-07487-w
@@ -107,3 +107,15 @@
 
 - [Programming Biomolecular Interactions with All-Atom Generative Model](https://doi.org/10.64898/2026.03.12.711044)
   - DOI: 10.64898/2026.03.12.711044
+
+- [LeJEPA: Provable and Scalable Self-Supervised Learning Without the Heuristics](https://doi.org/10.48550/arXiv.2511.08544)
+  - DOI: 10.48550/arXiv.2511.08544
+
+- [LeWorldModel: Stable End-to-End Joint-Embedding Predictive Architecture from Pixels](https://doi.org/10.48550/arXiv.2603.19312)
+  - DOI: 10.48550/arXiv.2603.19312
+
+- [Representation Alignment for Generation: Training Diffusion Transformers Is Easier Than You Think](https://doi.org/10.48550/arXiv.2410.06940)
+  - DOI: 10.48550/arXiv.2410.06940
+
+- [Fast and Ultra-Capable Protein Design: Advancing the Frontier Through Atomistic SE(3)-Equivariance with Genie 3.](https://doi.org/10.64898/2026.05.01.722168)
+  - DOI: 10.64898/2026.05.01.722168

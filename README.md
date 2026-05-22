@@ -20,10 +20,9 @@ A personal research assistant that collects, organizes, and recommends papers.
 - **Email Cleanup** (done): Auto-trash processed emails after digest
 - **Paper DB** (done): Local storage with `sqlite-vec` + Ollama embeddings (`qwen3-embedding:8b`, MRL 1024d)
 - **Similarity Search** (done): Score digest papers by vector similarity to reference papers (top 3 shown)
+- **Paper Recommendations** (done): Crawl arXiv/bioRxiv → embed → score against reference DB → Slack digest
 - **Field Classification** (planned): Auto-categorize papers by research area
-- **Recommendation** (planned): Importance scoring based on user interests
 - **Full Paper Summarization** (planned): Summarize based on full paper content, not just abstract
-- **Paper Crawler** (planned): Collect papers beyond Scholar alerts
 - **Slack Bot** (planned): On-demand queries and digests via Slack
 
 ## Prerequisites
@@ -108,6 +107,15 @@ pixi run db-import                       # Import from data/jsons/ (replaces DB)
 pixi run db-import --md                  # Import from Markdown (refetch + rebuild)
 pixi run db-import --input file.json     # Import from single JSON file
 pixi run db-rebuild                      # Re-generate all embeddings
+
+# --- Recommend ---
+pixi run recommend                       # Crawl yesterday's arXiv + bioRxiv → score → Slack
+pixi run recommend arxiv                 # arXiv only (default categories)
+pixi run recommend biorxiv               # bioRxiv only (default categories)
+pixi run recommend arxiv -c "cs.LG,cs.AI"  # Custom categories
+pixi run recommend --days-back 3 -n 30   # Look back 3 days, show top 30
+pixi run recommend -t 0.6               # Raise similarity threshold (default 0.5)
+pixi run recommend --no-slack            # Terminal output only (top 20)
 ```
 
 To see all available options:
@@ -186,11 +194,11 @@ Gmail API → batch detect → fetch → parse → dedup → abstract fetch (Pub
   → summarize → embed → similarity scoring (top 3) → sort by reference → Slack / JSON
 ```
 
-- **extract/** — `GmailClient` (auth, fetch, parse, trash), `abstract_fetcher` (PubMed API → HTTP crawling fallback)
+- **extract/** — `GmailClient` (auth, fetch, parse, trash), `abstract_fetcher` (PubMed API → HTTP crawling fallback), `crawler` (arXiv/bioRxiv crawling), `paper_fetcher` (metadata by DOI/URL), `normalizers` (text cleanup)
 - **transform/** — `dedup` (deduplication + grouping), `summarizer` (LLM summarization via Ollama)
 - **database/** — `embedder` (Ollama embeddings, MRL truncation), `repository` (sqlite-vec CRUD + similarity search)
-- **load/** — `terminal` (console output), `slack` (Slack digest posting)
-- **cli/** — `digest.py` (digest command), `paper.py` (add/edit/list), `io.py` (export/import/rebuild)
+- **load/** — `terminal` (console output), `slack_common` + `slack_digest` + `slack_recommend` (Slack posting)
+- **cli/** — `digest.py` (digest command), `recommend.py` (recommend command), `paper.py` (add/edit/list), `io.py` (export/import/rebuild)
 - **root** — `pipeline.py` (orchestration), `config.py` (credentials from .env), `schemas.py` (data schemas), `main.py` (entry point)
 
 See [docs/architecture.md](docs/architecture.md) for details.
@@ -216,16 +224,19 @@ This enables automatic linting (ruff) and `papers.md` export on every commit.
 
 #### Option 1: cron
 
-To run larklab automatically every day at 9:00 AM:
+To run larklab automatically every day:
 
 1. Open the crontab editor:
    ```bash
    crontab -e
    ```
 
-2. Add the following line:
+2. Add the following lines:
    ```bash
-   0 9 * * * cd /Users/jk_cssb/larklab && /Users/jk_cssb/.pixi/bin/pixi run digest >> /tmp/larklab.log 2>&1
+   # Digest at 8:00 AM
+   0 8 * * * cd /Users/jk_cssb/larklab && /Users/jk_cssb/.pixi/bin/pixi run digest >> /tmp/larklab.log 2>&1
+   # Recommend at 9:00 AM
+   0 9 * * * cd /Users/jk_cssb/larklab && /Users/jk_cssb/.pixi/bin/pixi run recommend >> /tmp/larklab.log 2>&1
    ```
 
 3. Verify the cron job is registered:
