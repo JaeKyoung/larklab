@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from larklab.extract.normalizers import clean_crossref_abstract
 from larklab.schemas import Paper, ScholarPaper
 
 logger = logging.getLogger(__name__)
@@ -199,15 +200,6 @@ def _fetch_abstract_pubmed(
     if doi_tag:
         doi = doi_tag.text
     return abstract, doi
-
-
-def clean_crossref_abstract(raw: str) -> str:
-    """Clean CrossRef abstract: strip HTML tags, 'Abstract' prefix, whitespace."""
-    text = re.sub(r"<[^>]+>", "", raw)
-    text = re.sub(r"^\s*Abstract\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*—[A-Z]{1,4}\s*$", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
 
 
 def _fetch_abstract_crossref(client: httpx.Client, doi: str) -> str | None:

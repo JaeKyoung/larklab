@@ -40,6 +40,7 @@ db-search = { cmd = "larklab db-search", description = "Search papers by keyword
 db-export = { cmd = "larklab db-export", description = "Export papers to JSON or Markdown" }
 db-import = { cmd = "larklab db-import", description = "Import papers from JSON" }
 db-rebuild = { cmd = "larklab db-rebuild", description = "Re-generate all embeddings" }
+recommend = { cmd = "larklab recommend", description = "Recommend papers from arXiv/bioRxiv" }
 
 [tool.pixi.dependencies]
 ruff = ">=0.15.5,<0.16"

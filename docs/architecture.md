@@ -24,19 +24,21 @@ src/larklab/
 ├── cli/                   # CLI commands (click group)
 │   ├── __init__.py        # CLI group definition + command registration
 │   ├── digest.py          # digest command
+│   ├── recommend.py       # recommend command (arXiv/bioRxiv crawl → score → Slack)
 │   ├── paper.py           # db-add, db-edit, db-delete, db-list, db-search
 │   └── io.py              # db-export, db-import, db-rebuild
 │
 ├── extract/               # Extract — data collection from external sources
 │   ├── gmail_client.py    # GmailClient class (auth, fetch, parse, trash)
 │   ├── scholar_parser.py  # HTML parsing (called via GmailClient facade)
-│   ├── abstract_fetcher.py # Fetch full abstracts + DOI (PubMed API → HTTP fallback), extract_doi utility
-│   └── paper_fetcher.py   # Fetch paper metadata by DOI/URL (PubMed → arXiv → bioRxiv → CrossRef → HTML)
+│   ├── abstract_fetcher.py # Fetch full abstracts + DOI (PubMed API → HTTP fallback)
+│   ├── paper_fetcher.py   # Fetch paper metadata by DOI/URL (PubMed → arXiv → bioRxiv → CrossRef → HTML)
+│   ├── crawler.py         # Crawl arXiv/bioRxiv for new papers by category + date
+│   └── normalizers.py     # Text cleanup (bioRxiv SCPLOW, CrossRef HTML)
 │
 ├── transform/             # Transform — data processing & analysis
 │   ├── dedup.py           # Deduplication + grouping by date
-│   ├── summarizer.py      # LLM summarization (Ollama)
-│   └── (scorer.py)        # ← planned: recommendation scoring
+│   └── summarizer.py      # LLM summarization (Ollama)
 │
 ├── database/              # Database — paper storage & similarity search
 │   ├── embedder.py        # Ollama embeddings (qwen3-embedding:8b, MRL 1024d)
@@ -44,7 +46,9 @@ src/larklab/
 │
 └── load/                  # Load — result delivery
     ├── terminal.py        # Console output
-    ├── slack.py           # Slack digest posting
+    ├── slack_common.py    # Shared Slack utilities (post, paper card, retry)
+    ├── slack_digest.py    # Slack digest posting
+    ├── slack_recommend.py # Slack recommendation posting
     └── (bot.py)           # ← planned: Slack bot
 ```
 
@@ -57,7 +61,7 @@ Foundational modules (`config`, `schemas`) and orchestration (`main`, `pipeline`
 3. **Extract** — `extract/abstract_fetcher.py` fetches full abstracts via PubMed E-utilities API first (title search), then falls back to HTTP crawling (arXiv, Nature, generic meta tags). Replaces snippet only when fetched abstract is longer; preserves original on failure. HTTP fallback is rate-limited with 2s delay and retry on transient errors.
 4. **Transform** — `transform/summarizer.py` generates 3-bullet summaries (problem, technical approach, finding) of each paper's abstract using a local LLM (Ollama/qwen3:8b). Summaries are stored in `ScholarPaper.summary`.
 5. **Database** — `database/embedder.py` generates embeddings for each paper (title + abstract). `database/repository.py` compares against reference papers via `sqlite-vec` cosine distance. Each paper gets a `similar_papers` list with the top 3 closest references and their similarity scores. All papers pass through to output — no filtering. If no reference papers exist, scoring is skipped. Papers are sorted by top-1 reference so related papers appear adjacent.
-6. **Load** — `load/terminal.py` prints to console, `load/slack.py` sends formatted digest to Slack (summary + threaded details). `--output-json` exports the full digest as JSON for downstream automation (e.g., Claude Code scheduled agents)
+6. **Load** — `load/terminal.py` prints to console, `load/slack_digest.py` sends formatted digest to Slack (summary + threaded details), `load/slack_recommend.py` sends recommendation results. `--output-json` exports the full digest as JSON for downstream automation (e.g., Claude Code scheduled agents)
 
 ## Module Dependency Graph
 
@@ -69,7 +73,8 @@ main.py
   ├── database/repository    → schemas, database/embedder (sqlite-vec CRUD)
   ├── pipeline.py            → config, schemas, extract/*, transform/*, database/*
   ├── load/terminal.py       → schemas
-  └── load/slack.py          → config, schemas
+  ├── load/slack_digest.py   → config, schemas, load/slack_common
+  └── load/slack_recommend.py → config, schemas, load/slack_common
 
 schemas.py                    (no internal deps)
 ```
@@ -102,7 +107,7 @@ Google Scholar's HTML format will change eventually. All parsing logic is isolat
 
 | Phase | Modules | Description |
 |-------|---------|-------------|
-| Slack output | `load/slack.py`, `transform/summarizer.py` | Sends digest with AI summaries to Slack thread |
+| Slack output | `load/slack_digest.py`, `transform/summarizer.py` | Sends digest with AI summaries to Slack thread |
 | Full abstracts | `extract/abstract_fetcher.py` | Fetches full abstracts via PubMed API (primary) with HTTP crawling fallback (arXiv, Nature, generic meta tags) |
 | Email cleanup | `GmailClient.trash_emails()` | Default on (`--no-cleanup` to skip). Uses `ScholarPaper.source_email_id` to trash processed emails |
 | Paper DB | `database/repository.py`, `database/embedder.py` | sqlite-vec storage with `qwen3-embedding:8b` (MRL 1024d). Single `papers` table for reference papers |
@@ -111,11 +116,11 @@ Google Scholar's HTML format will change eventually. All parsing logic is isolat
 | Duplicate detection | `repository.py`, `cli/paper.py` | `db-add` detects near-duplicates by embedding similarity (cosine distance < 0.2). Prompts per match: update/new/skip. Shows preview before saving |
 | Multi-source fetch | `cli/paper.py` | `db-add` fetches metadata: PubMed (DOI) → arXiv API → bioRxiv API → CrossRef (DOI) → HTML crawl (last resort). Accepts URL or DOI |
 
+| Paper Recommendations | `extract/crawler.py`, `cli/recommend.py`, `load/slack_recommend.py` | Crawl arXiv/bioRxiv by category → embed → score against references → Slack. See [crawl-categories.md](crawl-categories.md) |
+
 ### Planned
 
-- **Recommendation Scoring**: `transform/scorer.py` for importance scoring beyond binary similarity threshold
 - **Field Classification**: Auto-categorize papers by research area
-- **Paper Crawler**: New module in `extract/` to collect papers beyond Scholar alerts
 - **Full Paper Summarization**: PDF download + text extraction in `extract/`, full-text mode in `transform/summarizer.py`
 - **Slack Bot**: `load/bot.py` that reuses `pipeline.py` for on-demand digests and queries
 - **Multi-backend summarization**: Currently Ollama only (`ollama.chat()`). To support other backends (OpenAI, Claude, etc.), consider `litellm` or a provider flag in `transform/summarizer.py`

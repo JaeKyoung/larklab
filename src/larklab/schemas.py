@@ -43,6 +43,7 @@ class Paper:
     doi: str
     id: int | None = None
     embedding: list[float] | None = None
+    published_date: date | None = None
 
     @property
     def url(self) -> str:

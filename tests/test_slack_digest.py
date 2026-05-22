@@ -3,7 +3,7 @@
 from larklab.config import load_config
 from larklab.extract.gmail_client import GmailClient
 from larklab.extract.scholar_parser import parse_email
-from larklab.load.slack import send_digest_to_slack
+from larklab.load.slack_digest import send_digest_to_slack
 from larklab.transform.dedup import group_and_dedup
 
 
