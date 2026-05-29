@@ -1,10 +1,12 @@
 """Crawl arXiv and bioRxiv for new papers."""
 
 import logging
+import time
 from datetime import UTC, date, datetime, timedelta
 
 import arxiv
 import httpx
+import requests
 
 from larklab.extract.paper_fetcher import (
     paper_from_arxiv_result,
@@ -13,6 +15,13 @@ from larklab.extract.paper_fetcher import (
 from larklab.schemas import Paper
 
 logger = logging.getLogger(__name__)
+
+ARXIV_ERRORS = (
+    arxiv.ArxivError,
+    requests.RequestException,
+)
+ARXIV_PAGE_SIZE = 50
+ARXIV_RATE_LIMIT_BACKOFF_SECONDS = 60
 
 ARXIV_DEFAULTS = [
     "q-bio.BM",
@@ -36,24 +45,27 @@ def crawl_arxiv(
     max_results: int = 200,
 ) -> list[Paper]:
     cats = categories or ARXIV_DEFAULTS
-    query = " OR ".join(f"cat:{c}" for c in cats)
     today = date.today()
     end_date = today - timedelta(days=1)
     start_date = end_date - timedelta(days=days_back - 1)
     cutoff = datetime(start_date.year, start_date.month, start_date.day, tzinfo=UTC)
 
-    client = arxiv.Client(page_size=100, delay_seconds=3)
-    search = arxiv.Search(
-        query=query,
-        max_results=max_results,
-        sort_by=arxiv.SortCriterion.SubmittedDate,
-        sort_order=arxiv.SortOrder.Descending,
-    )
+    # Query each category separately: arXiv's API returns HTTP 429 for the
+    # combined "cat:A OR cat:B OR ..." query, while single-category queries
+    # work reliably. delay_seconds spaces requests to avoid rate limiting.
+    page_size = min(ARXIV_PAGE_SIZE, max_results)
+    client = arxiv.Client(page_size=page_size, delay_seconds=10, num_retries=5)
 
     papers = []
     seen: set[str] = set()
-    try:
-        for r in client.results(search):
+    for cat in cats:
+        search = arxiv.Search(
+            query=f"cat:{cat}",
+            max_results=max_results,
+            sort_by=arxiv.SortCriterion.SubmittedDate,
+            sort_order=arxiv.SortOrder.Descending,
+        )
+        for r in _arxiv_results_with_backoff(client, search, cat):
             pub = r.published if r.published.tzinfo else r.published.replace(tzinfo=UTC)
             if pub.date() > end_date:
                 continue
@@ -64,10 +76,27 @@ def crawl_arxiv(
                 continue
             seen.add(key)
             papers.append(paper_from_arxiv_result(r))
-    except (arxiv.HTTPError, arxiv.UnexpectedEmptyPageError) as e:
-        logger.warning("arXiv crawl stopped: %s", e)
 
     return papers
+
+
+def _arxiv_results_with_backoff(client: arxiv.Client, search: arxiv.Search, cat: str):
+    """Yield arXiv results, retrying one category once after a 429."""
+    for attempt in range(2):
+        try:
+            yield from client.results(search)
+            return
+        except ARXIV_ERRORS as e:
+            if attempt == 0 and isinstance(e, arxiv.HTTPError) and e.status == 429:
+                logger.warning(
+                    "arXiv rate limited for cat:%s; retrying after %ds",
+                    cat,
+                    ARXIV_RATE_LIMIT_BACKOFF_SECONDS,
+                )
+                time.sleep(ARXIV_RATE_LIMIT_BACKOFF_SECONDS)
+                continue
+            logger.warning("arXiv crawl stopped for cat:%s: %s", cat, e)
+            return
 
 
 def crawl_biorxiv(
