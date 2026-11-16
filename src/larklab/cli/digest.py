@@ -1,14 +1,21 @@
+from pathlib import Path
+
 import click
 
-from larklab.cli.common import CONTEXT_SETTINGS
 from larklab.config import load_config
-from larklab.extract.gmail_client import GmailClient
-from larklab.load.slack_digest import send_digest_to_slack
-from larklab.load.terminal import print_digest
-from larklab.pipeline import run_digest_pipeline
+from larklab.outputs.digest_json import write_digest_json
+from larklab.outputs.slack.digest import send_digest_to_slack
+from larklab.outputs.terminal import print_digest
+from larklab.pipelines.scholar_digest import (
+    DigestOptions,
+    message_ids_to_trash,
+    run_digest_pipeline,
+)
+from larklab.processing.summarizer import DEFAULT_SUMMARY_MODEL
+from larklab.sources.gmail.client import GmailClient
 
 
-@click.command(context_settings=CONTEXT_SETTINGS)
+@click.command()
 @click.option(
     "--max-results",
     default=200,
@@ -23,7 +30,7 @@ from larklab.pipeline import run_digest_pipeline
 )
 @click.option(
     "--model",
-    default="qwen3:8b",
+    default=DEFAULT_SUMMARY_MODEL,
     help="Ollama model for summarization",
     show_default=True,
 )
@@ -50,9 +57,9 @@ from larklab.pipeline import run_digest_pipeline
     help="Skip fetching full abstracts from paper URLs",
 )
 @click.option(
-    "--no-cleanup",
+    "--cleanup",
     is_flag=True,
-    help="Skip trashing processed emails after output",
+    help="Trash the processed emails once the digest was delivered",
 )
 @click.option(
     "--verbose",
@@ -84,7 +91,7 @@ def digest(
     channel,
     query,
     no_fetch_abstracts,
-    no_cleanup,
+    cleanup,
     verbose,
     batches,
     no_slack,
@@ -92,76 +99,48 @@ def digest(
 ):
     """Fetch Scholar emails, summarize, and send digest to Slack"""
     config = load_config()
-    config.scholar_query = query
-    config.max_results = max_results
-    config.days_back = days_back
-    config.slack_channel = channel
-    config.ollama_model = model
-    config.use_summary = summary
-
     gmail = GmailClient(config)
-
-    digests, num_emails, num_parsed = run_digest_pipeline(
-        config,
+    result = run_digest_pipeline(
         gmail,
-        fetch_abstracts=not no_fetch_abstracts,
-        num_batches=batches,
+        config.db_path,
+        DigestOptions(
+            query=query,
+            max_results=max_results,
+            days_back=days_back,
+            fetch_abstracts=not no_fetch_abstracts,
+            summarize=summary,
+            summary_model=model,
+            num_batches=batches,
+        ),
     )
 
-    if not digests:
-        print("No papers found. Nothing to send.")
+    if not result.digests:
+        click.echo("No papers found. Nothing to send.")
         return
 
     if output_json:
-        import json
-        from dataclasses import fields
-        from datetime import datetime
-        from pathlib import Path
-
-        _EXCLUDE = {"embedding", "source_email_id"}
-
-        def _paper_dict(p):
-            d = {}
-            for f in fields(p):
-                if f.name in _EXCLUDE:
-                    continue
-                v = getattr(p, f.name)
-                if isinstance(v, datetime):
-                    v = v.isoformat()
-                d[f.name] = v
-            return d
-
-        payload = {
-            "generated_at": datetime.now().isoformat(),
-            "num_emails": num_emails,
-            "num_parsed": num_parsed,
-            "digests": [
-                {
-                    "date": d.date.isoformat(),
-                    "papers": [_paper_dict(p) for p in d.papers],
-                }
-                for d in digests
-            ],
-        }
-        Path(output_json).write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        write_digest_json(
+            Path(output_json),
+            result.digests,
+            num_emails=result.num_emails,
+            num_parsed=result.num_parsed,
         )
-        print(f"Wrote JSON digest to {output_json}")
+        click.echo(f"Wrote JSON digest to {output_json}")
 
     if no_slack:
-        print_digest(digests)
-        sent_digests = digests
+        print_digest(result.digests)
+        sent_digests = result.digests
     else:
         sent_digests = send_digest_to_slack(
-            digests,
-            config,
-            num_emails=num_emails,
-            num_parsed=num_parsed,
+            result.digests, token=config.slack_bot_token, channel=channel
         )
 
-    if not no_cleanup:
-        if not sent_digests:
-            print("Slack delivery failed — skipping email cleanup.")
-        else:
-            trashed = gmail.trash_emails(sent_digests, verbose=verbose)
-            print(f"Trashed {len(trashed)} processed emails.")
+    if not cleanup:
+        return
+    if not sent_digests:
+        click.echo("Slack delivery failed — skipping email cleanup.")
+        return
+    trashed = gmail.trash_messages(
+        message_ids_to_trash(result, sent_digests), verbose=verbose
+    )
+    click.echo(f"Trashed {len(trashed)} processed emails.")
