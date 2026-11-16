@@ -1,4 +1,4 @@
-# Reference Papers (40)
+# Reference Papers (41)
 
 - [Accurate structure prediction of biomolecular interactions with AlphaFold 3.](https://doi.org/10.1038/s41586-024-07487-w)
   - DOI: 10.1038/s41586-024-07487-w
@@ -119,3 +119,6 @@
 
 - [Fast and Ultra-Capable Protein Design: Advancing the Frontier Through Atomistic SE(3)-Equivariance with Genie 3.](https://doi.org/10.64898/2026.05.01.722168)
   - DOI: 10.64898/2026.05.01.722168
+
+- [Biomolecular design through latent reasoning with RFD4-Proteina](https://doi.org/10.64898/2026.11.12.766037)
+  - DOI: 10.64898/2026.11.12.766037

@@ -107,18 +107,26 @@ Follow `.github/git_commit_template.md` for commit messages.
 - Use pixi with `pyproject.toml` — do NOT create `requirements.txt`
 - Use dataclasses for data transfer between modules
 - Each module has one public interface — keep it that way
-- `extract/scholar_parser.py` is fragile (depends on Google's HTML format) — isolate all parsing logic there. Called via `GmailClient` facade, not directly.
+- `sources/gmail/scholar_alert_parser.py` is fragile (depends on Google's HTML format) — isolate all parsing logic there. Called via the `GmailClient.parse_emails` facade, not directly.
+- **Layering**: dependencies point downward only — `cli → pipelines → sources / processing / library → models`; `outputs` depends on `models` alone; `utils` depends on nothing in the project. Keep it cycle-free.
+- **Where code goes**: folder and file names must say what the code is. `sources/` reads outside systems, `processing/` improves fetched papers, `library/` is the reference library, `outputs/` sends results out, `utils/` holds small project-agnostic helpers, `cli/` only parses options and prints. Split a module by job, and name files after the job (`cli/library/add.py`, not `cli/library_stuff.py`).
+- **One module per external source**: each file in `sources/papers/` talks to one service and exposes `fetch_by_*(…) -> Paper | None`. Source priority and merging live only in `sources/papers/metadata_lookup.py`. DOI prefixes live in `utils/identifiers.py`.
+- **Recommendations are incremental and lossless**: `recommend` resumes each source from `data/crawl_progress.json`, which moves only when the crawl read everything (`CrawlResult.complete`). Recommendations Slack refused are queued in `data/outbox.json` and posted with the next run. Save pending before advancing progress. arXiv lists papers only after announcement, so never go back to a fixed "yesterday" window. Nothing in tests or dev runs may post to Slack: use fakes or `--no-slack`.
+- Library code reports progress with `logging` (logger `larklab`), never `print`; only `cli/` and `outputs/terminal.py` print.
+- Writes to the library go through `PaperRepository` and stay transactional — compute embeddings first, then swap.
+- Tests are offline (fake sources, temp SQLite) and mirror the source tree folder by folder. Scripts that touch live Gmail/Slack go in `scripts/manual/`, never in `tests/`.
 - "New articles" emails must always be included in summaries — never skip or filter them out
 - Summarizer uses Ollama (qwen3:8b) locally — do not call external APIs for summarization
 - Gmail `send` scope is intentionally excluded — only `readonly` and `modify` are used
-- **Bot reusability**: `pipeline.py` is designed for reuse by future interactive bot — keep it pure and parameterizable
+- **Bot reusability**: `pipelines/` (`scholar_digest.py`, `paper_recommendations.py`) is designed for reuse by a future interactive bot — keep it pure (no printing, no click, no shared mutable config) and parameterizable via `DigestOptions` / function arguments
 - **Configuration approach**: `.env` for sensitive info only (tokens, credentials); CLI arguments (click) for all other settings
 - **Embedding/DB**: Use `sqlite-vec` + Ollama `qwen3-embedding:8b` (MRL truncated to 1024d, cosine distance). No external vector DB services. Single `papers` table for reference papers, `papers_vec` for embeddings.
   - Embedding input: `title + "\n" + abstract`
   - DB location: `data/larklab.db` (gitignored)
-  - `db-add` accepts URL or DOI. Fetch priority: PubMed (DOI) → arXiv API → bioRxiv API → CrossRef (DOI) → HTML crawl (last resort). Shows preview before saving, detects near-duplicates
+  - `db-add` accepts URL or DOI and requires a DOI to save. Lookup order: PubMed (DOI) → arXiv → CrossRef → bioRxiv; each later source only fills empty fields, and a web page is used only if no title was found. Shows preview before saving, detects near-duplicates
   - `db-*` commands: add, edit, delete, check, list, search, export, import, rebuild
-  - `db-export --md` outputs title + URL + DOI; `db-import --md` refetches metadata via DOI/URL and rebuilds DB
+  - `db-export --md` outputs title + URL + DOI; `db-import --md` refetches metadata via DOI/URL and rebuilds DB (asks before replacing; `--yes` skips). `papers.md` is lossy — use `db-export` JSON or the `.db` file for backups
+  - `db-check` also reports papers with no embedding; fix with `db-rebuild`
   - DOI stored as column in `papers` table; extracted from PubMed XML, `citation_doi` meta tag, or URL
   - Digest: scores all papers against references (top 3), sorted by top-1 reference, no filtering — all shown
 
@@ -133,7 +141,11 @@ pixi add --pypi <pypi-package>
 
 ```bash
 pixi run digest
+pixi run test    # offline suite
+pixi run lint
 ```
+
+The daily cron jobs run whatever branch is checked out in the project directory — keep it on a stable branch and develop in a separate `git worktree`.
 
 
 ## Key warnings

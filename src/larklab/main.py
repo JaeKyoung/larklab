@@ -1,7 +1,7 @@
 from larklab.cli import cli
 
 
-def main():
+def main() -> None:
     cli()
 
 

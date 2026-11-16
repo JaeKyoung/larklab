@@ -8,7 +8,7 @@ Scholar alerts → parse → dedup → abstract fetch → AI summarize → embed
 
 Store papers locally with vector embeddings for search and recommendation.
 
-- [x] Add `database/` module — `repository.py` (sqlite-vec CRUD), `embedder.py` (Ollama embeddings)
+- [x] Add `library/` module — `repository.py` (sqlite-vec CRUD), `embedder.py` (Ollama embeddings)
 - [x] Embedding: `qwen3-embedding:8b` with MRL truncation to 1024d
 - [x] Add `embedding`, `similar_papers` fields to `Paper` dataclass
 - [x] DB schema: `papers` (reference papers), `papers_vec` (embeddings)
@@ -34,7 +34,7 @@ Auto-categorize papers by research area.
 
 Surface relevant papers based on user interests.
 
-- [ ] Add `transform/scorer.py` for importance scoring
+- [ ] Add `processing/scorer.py` for importance scoring
 - [ ] Manage user interest profiles in `user_interests` table
 - [ ] Rank papers by relevance in digest output
 
@@ -42,8 +42,8 @@ Surface relevant papers based on user interests.
 
 Summarize based on full paper content, not just abstract.
 
-- [ ] PDF download + text extraction (extract/)
-- [ ] Full-text summarization mode in `transform/summarizer.py`
+- [ ] PDF download + text extraction (sources/)
+- [ ] Full-text summarization mode in `processing/summarizer.py`
 - [ ] CLI option to choose summary source (`--summary-source abstract|full`)
 - [ ] Requires larger context model — qwen3:8b may not be sufficient
 
@@ -51,11 +51,11 @@ Summarize based on full paper content, not just abstract.
 
 Collect papers beyond Scholar alerts.
 
-- [ ] New module in `extract/` — scope depends on target sources
+- [ ] New module in `sources/papers/` — scope depends on target sources
 
 ## Phase 7: Slack Bot (if needed)
 
 Only relevant after DB + recommendation are in place, and only if interactive queries via Slack become necessary. Current one-way digest delivery may be sufficient.
 
-- [ ] `load/bot.py` that reuses `pipeline.py`
+- [ ] `outputs/slack/bot.py` that reuses `pipelines/scholar_digest.py` and `pipelines/paper_recommendations.py`
 - [ ] Slash commands for search, recommendation queries
