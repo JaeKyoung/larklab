@@ -7,9 +7,8 @@ type: project
 User's next priorities (as of 2026-03-20):
 
 1. **Commit** — large set of uncommitted changes (see handoff). DB is empty — needs `db-import --md` after commit
-2. **Test end-to-end** — `db-import --md` to rebuild DB, then `pixi run digest --batches 1 --no-cleanup` to verify
-3. **Code structure refactor** — `cli/paper.py` still has fetch functions that should move to `extract/`
-   - Consider: `extract/fetchers/` directory with per-source modules
+2. **Test end-to-end** — `db-import --md` to rebuild DB, then `pixi run digest --batches 1` to verify
+3. ~~**Code structure refactor**~~ — done (branch `refactor/restructure-and-cleanup`): folders by purpose (`sources/`, `processing/`, `library/`, `outputs/`, `pipelines/`, `utils/`); fetch code in `sources/papers/` + `metadata_lookup.py`; `models.py`; offline test suite mirroring the source tree
 4. **Crawling** — direct arxiv/bioarxiv fetch (like prior bot) with threshold-based filtering
 5. **pixi → uv migration** — uv is faster, consider switching later
 

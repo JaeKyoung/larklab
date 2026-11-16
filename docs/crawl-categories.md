@@ -217,7 +217,7 @@ Focused on protein structure/design and AI methods for biology.
 - `econ.GN` — General Economics
 - `econ.TH` — Theoretical Economics
 
-### bioRxiv (27 categories)
+### bioRxiv (25 categories)
 
 1. Animal Behavior and Cognition
 2. Biochemistry

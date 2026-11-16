@@ -4,137 +4,219 @@
   <img src="img/image.png" alt="LarkLab">
 </p>
 
-A personal research assistant that collects, organizes, and recommends papers.
+A personal research assistant that collects, organizes, and recommends papers. It runs entirely on your own machine: papers live in a local SQLite file, embeddings and summaries come from a local [Ollama](https://ollama.ai) server, and the only outside services it talks to are Gmail (read + trash), Slack (post), and public paper metadata APIs.
 
-## What LarkLab does
+- [What it does](#what-it-does)
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Setup in detail](#setup-in-detail)
+- [Command reference](#command-reference)
+- [The reference library](#the-reference-library)
+- [Configuration](#configuration)
+- [Example output](#example-output)
+- [Project layout](#project-layout)
+- [Development](#development)
+- [Scheduling](#scheduling)
+- [Troubleshooting](#troubleshooting)
+- [Known limitations](#known-limitations)
 
-1. **Collect** — Gather papers from Google Scholar alerts (and future crawlers)
-2. **Store** — Save to local DB with vector embeddings for similarity search
-3. **Organize** — Classify papers by research field, deduplicate
-4. **Recommend** — Score and surface relevant papers based on your interests
-5. **Deliver** — Send daily digests to Slack with AI-summarized abstracts
+## What it does
 
-## Roadmap
+| Feature | Command | In one sentence |
+|---------|---------|-----------------|
+| Scholar digest | `digest` | Reads your Google Scholar alert emails, fetches full abstracts, optionally summarizes them with a local LLM, scores each paper against your reference library, and posts a threaded digest to Slack. |
+| Recommendations | `recommend` | Crawls the arXiv and bioRxiv submissions that are new since the last run, scores them against your reference library, and posts the closest matches to Slack. |
+| Reference library | `db-*` | A small curated set of papers you care about, stored with vector embeddings. Everything above is scored against it. |
 
-- **Scholar Digest** (done): Gmail fetch → parse → dedup → abstract summarization → Slack digest
-- **Email Cleanup** (done): Auto-trash processed emails after digest
-- **Paper DB** (done): Local storage with `sqlite-vec` + Ollama embeddings (`qwen3-embedding:8b`, MRL 1024d)
-- **Similarity Search** (done): Score digest papers by vector similarity to reference papers (top 3 shown)
-- **Paper Recommendations** (done): Crawl arXiv/bioRxiv → embed → score against reference DB → Slack digest
-- **Field Classification** (planned): Auto-categorize papers by research area
-- **Full Paper Summarization** (planned): Summarize based on full paper content, not just abstract
-- **Slack Bot** (planned): On-demand queries and digests via Slack
+Nothing is filtered out of the Scholar digest: every paper in your alerts is shown, and similarity to your reference papers is only context. Filtering (a similarity threshold) applies to `recommend`, where the volume is too high to read everything.
 
-## Prerequisites
+## How it works
 
-- Python 3.12+
-- [pixi](https://pixi.sh) package manager
-- Google Cloud project with Gmail API enabled
-- [Ollama](https://ollama.ai) with `qwen3:8b` (summarization) and `qwen3-embedding:8b` (embeddings)
+```
+digest     Gmail → batch detection → parse → dedup → full abstracts → summaries → similarity → Slack / JSON
+recommend  arXiv + bioRxiv crawl → drop papers you already have → similarity → threshold + top-N → Slack
+db-add     DOI or URL → metadata from several sources → preview → embedding → duplicate check → SQLite
+```
 
-## Setup
+- **Embeddings**: Ollama `qwen3-embedding:8b`, truncated to 1024 dimensions (Matryoshka) and L2-normalized. The text embedded is `title + "\n" + abstract`. Similarity is cosine (`1 - distance`).
+- **Storage**: one SQLite file, `data/larklab.db`, using [sqlite-vec](https://github.com/asg017/sqlite-vec) for vector search. Two tables: `papers` and `papers_vec`.
+- **Metadata sources** (`db-add`, `db-check --refetch`, `db-import --md`): PubMed, arXiv, CrossRef and bioRxiv are queried in that order and each later source only fills fields the earlier ones left empty, stopping as soon as title, authors, journal and abstract are all present. A publisher web page is used only if no source found a title.
+- **Summaries**: Ollama `qwen3:8b`, three bullets per abstract, only with `--summary`. Thinking mode is switched off (about 3 s per paper instead of 17 s). A paper that cannot be summarized keeps its abstract in the digest, and after three failures in a row (Ollama down) the remaining papers are not tried.
+- **Privacy**: no paper text is sent to a hosted LLM. Summaries and embeddings are computed locally.
 
-### 1. Configure Gmail API credentials
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (or select existing)
-3. Enable the **Gmail API**: Go to **API & Services** → **Library**, search "Gmail API", click it, then click **Enable**
-4. Navigate to **API & Services** → **OAuth consent screen**
-5. Set User type to **External**, fill in app name and email, save
-6. Add your Gmail address as a **test user**
-7. Go to **Credentials** → **Create Credentials** → **OAuth 2.0 Client ID**
-8. Application type: **Desktop application**
-9. Download the JSON file
-10. (Optional) Move it to the project for convenience — you can also set a custom path via `GMAIL_CREDENTIALS_PATH` in `.env`:
+## Quick start
 
 ```bash
+# 1. dependencies (pixi installs Python and everything else)
+pixi install
+
+# 2. local models
+ollama pull qwen3-embedding:8b
+ollama pull qwen3:8b            # only needed for `digest --summary`
+
+# 3. credentials: see "Setup in detail" for Gmail and Slack
+cp .env.example .env
+
+# 4. seed the reference library with a few papers you like
+pixi run db-add 10.1038/s41586-021-03819-2
+
+# 5. try it without posting anywhere
+pixi run digest --batches 1 --no-slack
+pixi run recommend --no-slack
+```
+
+Only the reference library is needed to try `recommend --no-slack`; Gmail and Slack are needed only for `digest` and for posting.
+
+## Setup in detail
+
+### Prerequisites
+
+- Python 3.12+ (managed by [pixi](https://pixi.sh))
+- [Ollama](https://ollama.ai) running locally with `qwen3-embedding:8b` (and `qwen3:8b` for summaries)
+- For `digest`: a Google Cloud project with the Gmail API enabled, and Google Scholar alerts delivered to that Gmail account
+- For Slack posting: a Slack bot token (see [docs/slack-setup.md](docs/slack-setup.md))
+
+### 1. Gmail API credentials
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project (or select an existing one)
+3. Enable the **Gmail API**: **API & Services** → **Library**, search "Gmail API", click **Enable**
+4. **API & Services** → **OAuth consent screen**: user type **External**, fill in app name and email, save
+5. Add your Gmail address as a **test user**
+6. **Credentials** → **Create Credentials** → **OAuth 2.0 Client ID**, application type **Desktop application**
+7. Download the JSON file and put it where LarkLab expects it (or point `GMAIL_CREDENTIALS_PATH` at it):
+
+```bash
+mkdir -p credentials
 mv ~/Downloads/client_secret_*.json credentials/credentials.json
 ```
 
-### 2. Set up environment variables
+On the first `digest` run a browser window opens for OAuth consent. LarkLab requests only the `gmail.readonly` and `gmail.modify` scopes (read, and move to trash); the `send` scope is deliberately not requested. The resulting token is saved to `credentials/token.json` with owner-only permissions.
+
+### 2. Environment variables
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and add your Slack Bot token:
+Edit `.env` and add your Slack bot token:
+
 ```
 SLACK_BOT_TOKEN=xoxb-your-token-here
 ```
-See [docs/slack-setup.md](docs/slack-setup.md) for setup details.
 
-### 3. Install dependencies
+`.env` holds secrets and file paths only. Every other setting is a command-line option.
+
+### 3. Install and run
 
 ```bash
 pixi install
-```
-
-### 4. Run
-
-```bash
 pixi run digest
 ```
 
-On first run, a browser window opens for Gmail OAuth consent. Gmail scopes (`readonly`, `modify`) are requested automatically by the code — no manual scope configuration needed in Google Cloud Console. After granting access, `credentials/token.json` is saved for subsequent runs.
+## Command reference
 
-#### CLI Commands
+All commands are run as `pixi run <command>` (or `pixi run larklab <command>`). Add `--help` to any command for its options.
+
+### `digest`
+
+Fetch Scholar alert emails, enrich them, and post a digest.
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--days-back N` | 7 | How far back to search Gmail |
+| `--max-results N` | 200 | Maximum emails to fetch |
+| `--batches N` | all | Process only the latest N alert batches (emails more than 2 hours apart start a new batch) |
+| `--query TEXT` | `from:scholaralerts-noreply@google.com` | Gmail search query |
+| `--summary` | off | Summarize abstracts with Ollama |
+| `--model TEXT` | `qwen3:8b` | Ollama model for `--summary` |
+| `--no-fetch-abstracts` | off | Keep the short email snippets |
+| `--channel TEXT` | `journal-club` | Slack channel |
+| `--no-slack` | off | Print instead of posting (with `--cleanup`, the print counts as delivered) |
+| `--cleanup` | off | Trash processed emails once their digest was delivered. Without it nothing is ever trashed |
+| `--verbose` | off | Log each trashed email's subject |
+| `--output-json PATH` | none | Also write the digest as JSON for downstream automation |
+
+With `--cleanup`, processed emails are moved to Gmail's trash (recoverable) only after their digest was delivered. That includes an email whose papers were all repeats of papers in other emails; an email with a paper in a digest that failed to post stays in the inbox for the next run.
+
+### `recommend [arxiv|biorxiv]`
+
+Crawl recent preprints and recommend the ones closest to your library.
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `-c, --categories TEXT` | per source | Comma-separated categories (requires a source argument) |
+| `-d, --days-back N` | 1 | Days to look back on the first run (later runs resume, see below) |
+| `-n, --top-n N` | 20 | Number of recommendations |
+| `-t, --threshold F` | 0.5 | Minimum similarity to the closest reference paper |
+| `--channel TEXT` | `journal-club` | Slack channel |
+| `--no-slack` | off | Print only |
+
+Papers already in your library are skipped, matched by DOI or by title ignoring case and punctuation. Default categories are listed in [docs/crawl-categories.md](docs/crawl-categories.md).
+
+**Each paper is recommended once, and none is lost.** `recommend` keeps two small files in `data/` (both gitignored, safe to delete):
+
+- `crawl_progress.json` — the newest paper handled per source. The next run resumes after it and catches up on missed days (at most a week). This matters because the servers behave differently: **arXiv** lists a paper only after it is *announced* (Sunday to Thursday evening, US Eastern), so at breakfast time in Asia the newest paper is one to three days old and a fixed "yesterday" window is always empty — which is why arXiv never showed up before. **bioRxiv** publishes whole days, so it resumes at the day after the last one seen.
+- `outbox.json` — recommendations Slack refused. They are kept and posted together with the next run's recommendations (even when that run finds nothing new), and removed as soon as Slack accepts them. Papers older than two weeks are dropped.
+
+A source's progress moves forward only when the crawl read everything. If one arXiv category failed (HTTP 429/503), the source is fetched again next time: you may see a few repeats, but never a gap. A `--no-slack` run prints the pending and new recommendations and changes nothing. arXiv is read up to 1000 papers per category per run, which covers a busy announcement of cs.LG. bioRxiv is read up to 200 matching papers per run, but never stops in the middle of a day (the next run resumes on the day after); its API now returns 30 entries per page, so the crawl follows the page size it is given.
+### Library commands
 
 ```bash
-# --- Digest ---
-pixi run digest                          # Full pipeline: fetch → summarize → score → Slack
-pixi run digest --batches 1 --no-slack   # Process latest batch, terminal output only
-pixi run digest --summary                # Summarize abstracts with AI (Ollama)
-pixi run digest --no-fetch-abstracts     # Use snippets only
-pixi run digest --no-cleanup             # Skip trashing processed emails
-pixi run digest --output-json /tmp/d.json  # Save results as JSON for post-processing
-
-# --- Paper DB ---
-pixi run db-add <url>                    # Add paper by URL (arXiv, Nature, bioRxiv, ...)
-pixi run db-add <doi>                    # Add paper by DOI (via PubMed → CrossRef)
-pixi run db-add <url> --title "..." --authors "A|B" --journal "Nature" --abstract "..."
-pixi run db-edit <id> --journal "Nature" # Edit existing paper fields
-pixi run db-delete <id>                  # Delete a paper
-pixi run db-list                         # List reference papers
-pixi run db-search "AlphaFold"           # Search by keyword + embedding similarity
-pixi run db-search --journal "Science"   # Search by journal only
-pixi run db-search "protein" --journal "Nature"  # Combine keyword + journal
-pixi run db-check                        # Check papers for missing fields
-pixi run db-check --refetch              # Re-fetch from URLs and compare
-pixi run db-export                       # Export papers to data/jsons/{id}.json
-pixi run db-export --md                  # Export as Markdown (title + URL + DOI)
-pixi run db-export --query "AlphaFold"   # Export matching papers only
-pixi run db-import                       # Import from data/jsons/ (replaces DB)
-pixi run db-import --md                  # Import from Markdown (refetch + rebuild)
-pixi run db-import --input file.json     # Import from single JSON file
-pixi run db-rebuild                      # Re-generate all embeddings
-
-# --- Recommend ---
-pixi run recommend                       # Crawl yesterday's arXiv + bioRxiv → score → Slack
-pixi run recommend arxiv                 # arXiv only (default categories)
-pixi run recommend biorxiv               # bioRxiv only (default categories)
-pixi run recommend arxiv -c "cs.LG,cs.AI"  # Custom categories
-pixi run recommend --days-back 3 -n 30   # Look back 3 days, show top 30
-pixi run recommend -t 0.6               # Raise similarity threshold (default 0.5)
-pixi run recommend --no-slack            # Terminal output only (top 20)
+pixi run db-add <doi-or-url>              # fetch, preview, confirm, embed, save
+pixi run db-add <doi> --journal "bioRxiv" # override any fetched field (--title --authors --journal --abstract)
+pixi run db-edit <id> --journal "Nature"  # edit fields (also --title --authors --abstract --doi)
+pixi run db-delete <id>                   # delete (asks first)
+pixi run db-list                          # list everything
+pixi run db-search "AlphaFold"            # keyword match in titles + similar papers by embedding
+pixi run db-search --journal "Science"    # filter by journal
+pixi run db-check                         # missing fields, and papers without an embedding
+pixi run db-check --refetch               # also re-fetch every paper and show what changed
+pixi run db-export                        # one JSON per paper in data/jsons/
+pixi run db-export --md                   # data/papers.md (title + DOI link)
+pixi run db-import --md                   # rebuild the library from data/papers.md
+pixi run db-import --input file.json -y   # replace from JSON without asking
+pixi run db-rebuild                       # re-embed every paper
 ```
 
-To see all available options:
-```bash
-pixi run larklab --help
-pixi run digest --help
-```
+Authors are separated with `|` on the command line (`--authors "Doe, Jane|Roe, Rich"`) because names contain commas.
+
+## The reference library
+
+The library is the heart of the scoring, so it is worth knowing how it behaves.
+
+- **A DOI is required.** `db-add` refuses a paper it cannot find a DOI for. Pass a DOI instead of a URL when a page does not expose one. arXiv papers get a synthetic DOI (`10.48550/arXiv.<id>`).
+- **Previews first.** `db-add` prints what it found, lists missing fields, and defaults to "No" when anything is missing. Use the override options to fill gaps, then confirm.
+- **Near-duplicates are caught.** An identical title, or an embedding closer than cosine distance 0.2, triggers a prompt per match: `update` (same paper, overwrite), `new` (different paper), or `skip`.
+- **Journal names are normalized** for preprint servers (`bioRxiv`, `medRxiv`, `arXiv`), because the sources spell them differently.
+- **`db-check`** flags papers with missing fields and papers that exist but have no embedding (they would silently never match anything). Fix those with `db-rebuild`.
+- **Writes are all-or-nothing.** `db-import` and `db-rebuild` compute everything first and swap it in with one transaction, so a failure (for example Ollama going down) leaves the library as it was.
+- **`papers.md` is lossy by design** (titles and DOIs only). `db-import --md` re-fetches everything over the network, so its result can differ slightly from what you had. For a faithful backup use `db-export` (JSON, includes abstracts) or copy `data/larklab.db`.
+
+### Changing the embedding model
+
+The model is fixed on purpose so that every vector in the database is comparable. To switch:
+
+1. `ollama pull <new-model>`
+2. Edit `EMBED_MODEL` (and `EMBED_DIM` if the new model's vectors are not truncatable to 1024) in `src/larklab/library/embedder.py`. The table's vector column is created with `EMBED_DIM`, so a different dimension also needs a new database file.
+3. `pixi run db-export` to keep a JSON copy, then `pixi run db-rebuild`.
+4. Run `pixi run db-check`, then compare a few `db-search` queries against what you saw before.
+
+Mixing vectors from two models in one database gives meaningless similarity scores — always rebuild everything.
 
 ## Configuration
 
-Sensitive tokens and file paths are stored in `.env`:
+Secrets and paths live in `.env`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GMAIL_CREDENTIALS_PATH` | `credentials/credentials.json` | Path to OAuth credentials |
-| `GMAIL_TOKEN_PATH` | `credentials/token.json` | Path to store auth token |
-| `SLACK_BOT_TOKEN` | | Slack Bot User OAuth Token ([setup](docs/slack-setup.md)) |
+| `GMAIL_CREDENTIALS_PATH` | `credentials/credentials.json` | OAuth client credentials |
+| `GMAIL_TOKEN_PATH` | `credentials/token.json` | Where the OAuth token is stored |
+| `SLACK_BOT_TOKEN` | | Slack bot user OAuth token ([setup](docs/slack-setup.md)) |
 
-## Example Output
+The database is always `data/larklab.db` (gitignored). `credentials/` and `.env` are gitignored; never commit them.
+
+## Example output
 
 ### Terminal
 
@@ -171,7 +253,7 @@ Trashed 10 processed emails.
 
 ### Slack
 
-Each batch is posted as a summary message with threaded paper cards (attachments):
+Each batch is a headline message with one threaded card per paper:
 
 ```
 *Scholar Digest — 2026-03-18*
@@ -185,134 +267,221 @@ Each batch is posted as a summary message with threaded paper cards (attachments
   ┃ Top 3 related paper (similarity: 0.691): Reference Paper Gamma
 ```
 
-## Architecture
+`recommend` posts one thread per publication date, with a headline such as `• arxiv: 3/40` (recommended / candidates scored).
 
-The project follows an ETL (Extract-Transform-Load) pipeline:
+### `--output-json`
+
+`digest --output-json out.json` writes everything a downstream script needs:
+
+```json
+{
+  "generated_at": "2026-03-19T08:00:12",
+  "num_emails": 10,
+  "num_parsed": 25,
+  "digests": [
+    {
+      "date": "2026-03-18",
+      "papers": [
+        {
+          "title": "Paper Title Here",
+          "authors": ["A Author", "B Author"],
+          "journal": "Nature, 2026",
+          "abstract": "Lorem ipsum...",
+          "url": "https://doi.org/10.1234/example",
+          "received_at": "2026-03-18T07:16:00+00:00",
+          "summary": "",
+          "doi": "10.1234/example",
+          "similar_papers": [["Reference Paper Alpha", 0.823]]
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Project layout
+
+Folder names say what the code does; each folder holds one kind of thing.
 
 ```
-Gmail API → batch detect → fetch → parse → dedup → abstract fetch (PubMed API → HTTP)
-  → summarize → embed → similarity scoring (top 3) → sort by reference → Slack / JSON
+src/larklab/
+├── main.py                      entry point
+├── config.py                    secrets and paths from .env
+├── models.py                    dataclasses: Paper, ScholarPaper, Recommendation, DailyDigest
+│
+├── cli/                         what you can run — thin: parse options, call a pipeline, print
+│   ├── digest.py                digest
+│   ├── recommend.py             recommend
+│   └── library/                 one module per job
+│       ├── add.py               db-add
+│       ├── edit.py              db-edit, db-delete
+│       ├── browse.py            db-list, db-search
+│       ├── health.py            db-check, db-rebuild
+│       └── backup.py            db-export, db-import
+│
+├── pipelines/                   end-to-end flows; no printing, reusable by a future bot
+│   ├── scholar_digest.py        Gmail → papers → abstracts → summaries → scores
+│   ├── paper_recommendations.py crawl → exclude known → score → rank
+│   ├── crawl_progress.py        remembers how far each source was crawled
+│   └── outbox.py                keeps recommendations Slack refused until they are sent
+│
+├── sources/                     reading from outside systems
+│   ├── gmail/                   client.py (OAuth, fetch, trash), scholar_alert_parser.py
+│   └── papers/                  pubmed_, crossref_, arxiv_, biorxiv_, web_page_source.py,
+│                                and metadata_lookup.py which merges them: DOI/URL → one Paper
+│
+├── processing/                  improving the fetched papers
+│   ├── abstract_enricher.py     email snippet → full abstract
+│   ├── dedup.py                 drop repeats, group by day
+│   └── summarizer.py            three-bullet summaries (Ollama)
+│
+├── library/                     the reference library
+│   ├── repository.py            SQLite + sqlite-vec
+│   ├── embedder.py              Ollama embeddings
+│   └── similarity.py            closest reference papers for each paper
+│
+├── outputs/                     sending results somewhere
+│   ├── slack/                   paper_thread.py, digest.py, recommendations.py
+│   ├── terminal.py              console output
+│   └── digest_json.py           --output-json
+│
+└── utils/                       small helpers that know nothing about the project
+    ├── identifiers.py           DOI / arXiv ID / URL helpers
+    ├── text.py                  title matching, journal names
+    ├── http.py                  the shared HTTP client
+    └── files.py                 atomic file writes
+
+tests/                           mirrors src/larklab/ folder by folder (offline)
+scripts/manual/                  hand-run helpers that touch live Gmail / Slack
 ```
 
-- **extract/** — `GmailClient` (auth, fetch, parse, trash), `abstract_fetcher` (PubMed API → HTTP crawling fallback), `crawler` (arXiv/bioRxiv crawling), `paper_fetcher` (metadata by DOI/URL), `normalizers` (text cleanup)
-- **transform/** — `dedup` (deduplication + grouping), `summarizer` (LLM summarization via Ollama)
-- **database/** — `embedder` (Ollama embeddings, MRL truncation), `repository` (sqlite-vec CRUD + similarity search)
-- **load/** — `terminal` (console output), `slack_common` + `slack_digest` + `slack_recommend` (Slack posting)
-- **cli/** — `digest.py` (digest command), `recommend.py` (recommend command), `paper.py` (add/edit/list), `io.py` (export/import/rebuild)
-- **root** — `pipeline.py` (orchestration), `config.py` (credentials from .env), `schemas.py` (data schemas), `main.py` (entry point)
-
-See [docs/architecture.md](docs/architecture.md) for details.
+Dependencies only point downward: `cli → pipelines → sources / processing / library → models`. `outputs` depends on `models` alone, `utils` on nothing in the project, and there are no import cycles. See [docs/architecture.md](docs/architecture.md) for the diagram and design notes.
 
 ## Development
 
-After cloning, install pre-commit hooks:
+After cloning:
 
 ```bash
 pixi install
 pixi run pre-commit install
 ```
 
-This enables automatic linting (ruff) and `papers.md` export on every commit.
+The hooks run ruff (lint + format) and re-export `data/papers.md` from the database on every commit.
 
-## Known Limitations
+```bash
+pixi run test      # offline test suite — no network, no Ollama, no Gmail, no Slack
+pixi run lint      # ruff check
+pixi run format    # ruff format
+```
 
-- **Abstract fetching coverage**: Full abstract fetching uses PubMed E-utilities API first (title search), then falls back to HTTP crawling (arXiv, Nature, generic meta tags). Papers not indexed in PubMed and hosted on JS-rendered sites may retain the original snippet.
+The tests mirror the source tree (`tests/sources/papers/test_pubmed_source.py` tests `src/larklab/sources/papers/pubmed_source.py`). They use fake sources and a temporary SQLite file, so they are safe to run anywhere. Scripts that touch live services (Gmail, Slack) are not tests; they live in `scripts/manual/` and are run by hand.
 
-## Usage
+Conventions are in [CLAUDE.md](CLAUDE.md): commit messages follow `.github/git_commit_template.md`, all code and docs are in English, and dependencies are added with `pixi add`.
 
-### Scheduling
+### Adding a metadata source
 
-#### Option 1: cron
+1. Create `sources/papers/<name>_source.py` exposing `fetch_by_doi(client, doi) -> Paper | None` (return `None` rather than an empty `Paper` when the source does not know the paper).
+2. Register it in `_build_lookups` in `sources/papers/metadata_lookup.py` at the right priority.
+3. Test it with `httpx.MockTransport` (see `tests/test_crossref_source.py`).
 
-To run larklab automatically every day:
+## Scheduling
 
-1. Open the crontab editor:
-   ```bash
-   crontab -e
-   ```
+### Option 1: cron
 
-2. Add the following lines:
-   ```bash
-   # Digest at 8:00 AM
-   0 8 * * * cd /Users/jk_cssb/larklab && /Users/jk_cssb/.pixi/bin/pixi run digest >> /tmp/larklab.log 2>&1
-   # Recommend at 9:00 AM
-   0 9 * * * cd /Users/jk_cssb/larklab && /Users/jk_cssb/.pixi/bin/pixi run recommend >> /tmp/larklab.log 2>&1
-   ```
+```bash
+crontab -e
+```
 
-3. Verify the cron job is registered:
-   ```bash
-   crontab -l
-   ```
+```bash
+# Digest at 8:00 AM
+0 8 * * * cd /path/to/larklab && /path/to/pixi run digest --days-back 999 --max-results 200 --batches 5 --cleanup >> /tmp/larklab.log 2>&1
+# Recommend at 11:00 AM, after arXiv's morning announcement (see Timing below)
+0 11 * * * cd /path/to/larklab && /path/to/pixi run recommend >> /tmp/larklab.log 2>&1
+```
 
-Logs are written to `/tmp/larklab.log`. To disable, remove the line with `crontab -e`.
+Progress is logged to stdout, so `/tmp/larklab.log` shows each stage. Check registration with `crontab -l`.
 
-> **Note**: On macOS, you may need to grant **Full Disk Access** to `cron` (or your terminal) in **System Settings → Privacy & Security** for Gmail token access to work.
+> **macOS**: you may need to grant **Full Disk Access** to `cron` (or your terminal) in **System Settings → Privacy & Security** for the Gmail token to be readable.
 
-> **Warning**: cron skips jobs when the machine is asleep or powered off, and does not retry them later. Use launchd below if you want missed jobs to run automatically on wake.
+> **Warning**: cron skips jobs when the machine is asleep or off and does not retry. Use launchd if you want missed jobs to run on wake.
 
-#### Option 2: launchd (recommended for macOS)
+> **Tip**: cron runs whatever branch is checked out in the project directory. Keep that checkout on a stable branch and develop in a separate `git worktree`.
 
-macOS native scheduler. Unlike cron, launchd automatically runs missed jobs when the machine wakes up.
+> **Timing**: arXiv announces new papers around 20:00 US Eastern, which is 09:00 in Korea during US daylight time and 10:00 otherwise. `recommend` resumes from `data/crawl_progress.json`, so no paper is missed whatever the hour — but run it at 11:00 or later so that morning's announcement is already listed; a 09:00 run would only see it a day later. A digest run without `--summary` (the example above) does not use the Ollama chat model at all; only the embedding model is needed.
 
-1. Remove existing cron job if present:
-   ```bash
-   crontab -e  # delete the larklab line
-   ```
+### Option 2: launchd (recommended for macOS)
 
-2. Create the plist file:
-   ```bash
-   cat > ~/Library/LaunchAgents/com.larklab.digest.plist << 'EOF'
-   <?xml version="1.0" encoding="UTF-8"?>
-   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-   <plist version="1.0">
-   <dict>
-       <key>Label</key>
-       <string>com.larklab.digest</string>
-       <key>ProgramArguments</key>
-       <array>
-           <string>/Users/jk_cssb/.pixi/bin/pixi</string>
-           <string>run</string>
-           <string>digest</string>
-       </array>
-       <key>WorkingDirectory</key>
-       <string>/Users/jk_cssb/larklab</string>
-       <key>StartCalendarInterval</key>
-       <dict>
-           <key>Hour</key>
-           <integer>9</integer>
-           <key>Minute</key>
-           <integer>0</integer>
-       </dict>
-       <key>StandardOutPath</key>
-       <string>/tmp/larklab.log</string>
-       <key>StandardErrorPath</key>
-       <string>/tmp/larklab.log</string>
-   </dict>
-   </plist>
-   EOF
-   ```
+launchd runs missed jobs when the machine wakes up.
 
-3. Load and activate:
-   ```bash
-   launchctl load ~/Library/LaunchAgents/com.larklab.digest.plist
-   ```
+1. Remove the cron job if present (`crontab -e`).
+2. Create the plist, replacing the paths. For `recommend`, make a second copy with the label `com.larklab.recommend`, the argument `recommend` and `Hour` 11 (see the timing note above):
 
-4. Verify registration:
-   ```bash
-   launchctl list | grep larklab
-   ```
+```bash
+cat > ~/Library/LaunchAgents/com.larklab.digest.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.larklab.digest</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/pixi</string>
+        <string>run</string>
+        <string>digest</string>
+        <string>--cleanup</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/larklab</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/larklab.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/larklab.log</string>
+</dict>
+</plist>
+EOF
+```
+
+3. Load it and check:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.larklab.digest.plist
+launchctl list | grep larklab
+```
 
 To disable:
+
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.larklab.digest.plist
 rm ~/Library/LaunchAgents/com.larklab.digest.plist
 ```
 
-### Slack Bot
+## Troubleshooting
 
-See [docs/slack-setup.md](docs/slack-setup.md) for bot setup.
+| Symptom | Likely cause and fix |
+|---------|----------------------|
+| Only bioRxiv papers show up in Slack | arXiv lists a paper only after it is announced, so "yesterday" is always empty. `recommend` now resumes from `data/crawl_progress.json`; check the log for `Found N papers (arxiv: …)`. 429/503 from arXiv are retried per category and logged as `arXiv rate limited` / `arXiv crawl stopped`. |
+| `db-check` says `missing: embedding` | The paper was stored without a vector, so similarity search cannot see it. Run `pixi run db-rebuild`. |
+| `db-add` ends with "Could not determine a DOI" | The page does not expose a DOI. Find it on the publisher page and pass the DOI instead of the URL. |
+| `db-add` shows `Journal: (none)` | The sources did not return a journal. Pass `--journal`. |
+| Connection errors from `db-add`, `db-rebuild`, `digest` | Ollama is not running, or the model is not pulled: `ollama serve`, `ollama pull qwen3-embedding:8b`. |
+| Slack posts nothing | `SLACK_BOT_TOKEN` is empty, or the bot is not invited to the channel. See [docs/slack-setup.md](docs/slack-setup.md). `digest` then keeps your emails; `recommend` keeps the recommendations in `data/outbox.json` and sends them with the next run. |
+| The digest lists papers with short abstracts | Some sites block automated requests. The snippet from the email is kept (see below). |
+
+## Known limitations
+
+- **Abstract coverage**: full abstracts come from PubMed, then CrossRef, then the paper's web page (arXiv, Nature, generic meta tags). Papers not indexed in PubMed and hosted on JavaScript-rendered or bot-protected sites keep the short snippet from the email.
+- **Scholar HTML**: the alert parser depends on Google's email layout. If Google changes it, only `sources/gmail/scholar_alert_parser.py` needs to change.
+- **Sequential Gmail calls**: messages are fetched one by one. Fine for tens of emails; a batch request would be the next optimization for hundreds.
+- **bioRxiv only**: the crawler uses the bioRxiv API; medRxiv is not crawled.
 
 ---
 
 All code in this project was written by [Claude Code](https://claude.com/claude-code) (Anthropic).
-
