@@ -25,7 +25,7 @@ A personal research assistant that collects, organizes, and recommends papers. I
 | Feature | Command | In one sentence |
 |---------|---------|-----------------|
 | Scholar digest | `digest` | Reads your Google Scholar alert emails, fetches full abstracts, optionally summarizes them with a local LLM, scores each paper against your reference library, and posts a threaded digest to Slack. |
-| Recommendations | `recommend` | Crawls the arXiv and bioRxiv submissions that are new since the last run, scores them against your reference library, and posts the closest matches to Slack. |
+| Recommendations | `recommend` | Crawls the arXiv, bioRxiv and PubMed papers that are new since the last run, scores them against your reference library, and posts the closest matches to Slack. |
 | Reference library | `db-*` | A small curated set of papers you care about, stored with vector embeddings. Everything above is scored against it. |
 
 Nothing is filtered out of the Scholar digest: every paper in your alerts is shown, and similarity to your reference papers is only context. Filtering (a similarity threshold) applies to `recommend`, where the volume is too high to read everything.
@@ -34,7 +34,7 @@ Nothing is filtered out of the Scholar digest: every paper in your alerts is sho
 
 ```
 digest     Gmail → batch detection → parse → dedup → full abstracts → summaries → similarity → Slack / JSON
-recommend  arXiv + bioRxiv crawl → drop papers you already have → similarity → threshold + top-N → Slack
+recommend  arXiv + bioRxiv + PubMed crawl → drop papers you already have → similarity → threshold + top-N → Slack
 db-add     DOI or URL → metadata from several sources → preview → embedding → duplicate check → SQLite
 ```
 
@@ -62,10 +62,10 @@ pixi run db-add 10.1038/s41586-021-03819-2
 
 # 5. try it without posting anywhere
 pixi run digest --batches 1 --no-slack
-pixi run recommend --no-slack
+pixi run recommend arxiv --no-slack   # arXiv only: PubMed alone is hours of embedding
 ```
 
-Only the reference library is needed to try `recommend --no-slack`; Gmail and Slack are needed only for `digest` and for posting.
+Only the reference library is needed to try `recommend arxiv --no-slack`; Gmail and Slack are needed only for `digest` and for posting.
 
 ## Setup in detail
 
@@ -139,13 +139,13 @@ Fetch Scholar alert emails, enrich them, and post a digest.
 
 With `--cleanup`, processed emails are moved to Gmail's trash (recoverable) only after their digest was delivered. That includes an email whose papers were all repeats of papers in other emails; an email with a paper in a digest that failed to post stays in the inbox for the next run.
 
-### `recommend [arxiv|biorxiv]`
+### `recommend [SOURCE...]`
 
-Crawl recent preprints and recommend the ones closest to your library.
+Crawl recent papers and recommend the ones closest to your library. Name the sources to read, one or more of `arxiv`, `biorxiv`, `pubmed`, in the order you want them (`recommend arxiv biorxiv`). With none, all three are read.
 
 | Option | Default | Meaning |
 |--------|---------|---------|
-| `-c, --categories TEXT` | per source | Comma-separated categories (requires a source argument) |
+| `-c, --categories TEXT` | per source | Comma-separated categories, or journals for `pubmed` (needs exactly one source) |
 | `-d, --days-back N` | 1 | Days to look back on the first run (later runs resume, see below) |
 | `-n, --top-n N` | 20 | Number of recommendations |
 | `-t, --threshold F` | 0.5 | Minimum similarity to the closest reference paper |
@@ -154,12 +154,14 @@ Crawl recent preprints and recommend the ones closest to your library.
 
 Papers already in your library are skipped, matched by DOI or by title ignoring case and punctuation. Default categories are listed in [docs/crawl-categories.md](docs/crawl-categories.md).
 
+**PubMed** is read one finished day at a time, like bioRxiv, by the date PubMed added each record (days are US Eastern, so a paper indexed in the evening is not skipped). Only papers with an abstract and a DOI count. Without `--categories` that is every journal except preprints (PubMed adds bioRxiv, medRxiv and arXiv preprints weeks late, hundreds in one day, and they come from their own sources on time): about 3000 to 6000 papers a day, and embedding them takes roughly 1.2 s each, so one run can take one to two hours. Narrow it with journal names or abbreviations, for example `pixi run recommend pubmed -c "Bioinformatics,Chemical Science"` (journals are separated by commas, so a full name that contains one, like "Proteins: Structure, Function, and Bioinformatics", needs its abbreviation `Proteins`). A name may be PubMed's exact title or abbreviation, or any spelling PubMed can map to a journal on its own: `Protein science` is read as `Protein Sci`, and the log says so. A name PubMed cannot place is warned about and left out; if none can be placed, nothing is read (never all of PubMed). Each PubMed paper is listed under `pubmed:<journal>` (`pubmed:Chem Sci`), and the Slack headline shows only the journals that have a recommendation. Everything a run reads is scored before anything is posted, so a slow PubMed run holds back the arXiv and bioRxiv posts of the same run. Run PubMed on its own (see Scheduling) and raise `-t` to keep only the closest papers.
+
 **Each paper is recommended once, and none is lost.** `recommend` keeps two small files in `data/` (both gitignored, safe to delete):
 
-- `crawl_progress.json` — the newest paper handled per source. The next run resumes after it and catches up on missed days (at most a week). This matters because the servers behave differently: **arXiv** lists a paper only after it is *announced* (Sunday to Thursday evening, US Eastern), so at breakfast time in Asia the newest paper is one to three days old and a fixed "yesterday" window is always empty — which is why arXiv never showed up before. **bioRxiv** publishes whole days, so it resumes at the day after the last one seen.
+- `crawl_progress.json` — the newest paper handled per source (and, for arXiv, the papers of the last two days, see below). The next run resumes after it and catches up on missed days (at most a week). Where the files live is set in `config.py`. This matters because the servers behave differently: **arXiv** lists a paper only after it is *announced* (Sunday to Thursday evening, US Eastern), so at breakfast time in Asia the newest paper is one to three days old and a fixed "yesterday" window is always empty — which is why arXiv never showed up before. arXiv can also list a paper after newer ones (one held for moderation), so it is read two days further back than its mark and the papers of that stretch are remembered, to be recommended only once. **bioRxiv** publishes whole days, so it resumes at the day after the last one seen.
 - `outbox.json` — recommendations Slack refused. They are kept and posted together with the next run's recommendations (even when that run finds nothing new), and removed as soon as Slack accepts them. Papers older than two weeks are dropped.
 
-A source's progress moves forward only when the crawl read everything. If one arXiv category failed (HTTP 429/503), the source is fetched again next time: you may see a few repeats, but never a gap. A `--no-slack` run prints the pending and new recommendations and changes nothing. arXiv is read up to 1000 papers per category per run, which covers a busy announcement of cs.LG. bioRxiv is read up to 200 matching papers per run, but never stops in the middle of a day (the next run resumes on the day after); its API now returns 30 entries per page, so the crawl follows the page size it is given.
+A source's progress moves forward only when the crawl read everything. If one arXiv category failed (HTTP 429/503), the source is fetched again next time: you may see a few repeats, but never a gap. A `--no-slack` run prints the pending and new recommendations and changes nothing. arXiv is read up to 1000 papers per category per run, which covers a busy announcement of cs.LG. PubMed is read a day at a time and stops after the day that passes 4000 papers, so a catch-up after missed days takes about one day per run. bioRxiv is read up to 200 matching papers per run, but never stops in the middle of a day (the next run resumes on the day after); its API now returns 30 entries per page, so the crawl follows the page size it is given.
 ### Library commands
 
 ```bash
@@ -395,8 +397,10 @@ crontab -e
 ```bash
 # Digest at 8:00 AM
 0 8 * * * cd /path/to/larklab && /path/to/pixi run digest --days-back 999 --max-results 200 --batches 5 --cleanup >> /tmp/larklab.log 2>&1
-# Recommend at 11:00 AM, after arXiv's morning announcement (see Timing below)
-0 11 * * * cd /path/to/larklab && /path/to/pixi run recommend >> /tmp/larklab.log 2>&1
+# arXiv and bioRxiv at 11:00 AM, after arXiv's morning announcement (see Timing below)
+0 11 * * * cd /path/to/larklab && /path/to/pixi run recommend arxiv biorxiv >> /tmp/larklab.log 2>&1
+# PubMed on its own: thousands of papers a day, so the run takes an hour or two
+0 12 * * * cd /path/to/larklab && /path/to/pixi run recommend pubmed -t 0.6 >> /tmp/larklab.log 2>&1
 ```
 
 Progress is logged to stdout, so `/tmp/larklab.log` shows each stage. Check registration with `crontab -l`.
@@ -414,7 +418,7 @@ Progress is logged to stdout, so `/tmp/larklab.log` shows each stage. Check regi
 launchd runs missed jobs when the machine wakes up.
 
 1. Remove the cron job if present (`crontab -e`).
-2. Create the plist, replacing the paths. For `recommend`, make a second copy with the label `com.larklab.recommend`, the argument `recommend` and `Hour` 11 (see the timing note above):
+2. Create the plist, replacing the paths. For `recommend`, make a second copy with the label `com.larklab.recommend`, the arguments `recommend arxiv biorxiv` and `Hour` 11, and a third for PubMed with the label `com.larklab.recommend-pubmed`, the arguments `recommend pubmed` and `Hour` 12 (see the timing note above):
 
 ```bash
 cat > ~/Library/LaunchAgents/com.larklab.digest.plist << 'EOF'

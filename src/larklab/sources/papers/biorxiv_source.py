@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime, timedelta
 import httpx
 
 from larklab.models import CrawlResult, Paper
-from larklab.sources.papers import MAX_CATCH_UP_DAYS
+from larklab.sources.papers import crawl_window
 from larklab.utils.http import build_http_client
 from larklab.utils.text import canonical_journal_name, normalize_title
 
@@ -76,14 +76,11 @@ def crawl_recent(
     it reached it in, because the next run resumes on the day after.
     """
     wanted_categories = {c.lower() for c in (categories or DEFAULT_CATEGORIES)}
-    end = date.today() - timedelta(days=1)  # bioRxiv posts whole days; today is open
-    start = end - timedelta(days=days_back - 1)
-    if since:
-        resume_day = since.date() + timedelta(days=1)
-        oldest_allowed = end - timedelta(days=MAX_CATCH_UP_DAYS - 1)
-        start = max(resume_day, oldest_allowed)
-        if start > end:
-            return CrawlResult([])
+    # bioRxiv posts whole days; today is still open
+    window = crawl_window(date.today() - timedelta(days=1), days_back, since)
+    if window is None:
+        return CrawlResult([])
+    start, end = window
 
     papers: list[Paper] = []
     seen_titles: set[str] = set()

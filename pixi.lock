@@ -462,7 +462,7 @@ packages:
 - pypi: ./
   name: larklab
   version: 0.1.0
-  sha256: 2eb2a54b8b8571e0d943a94758b541d476f61cc82fc4447b1e5cdb28be035e96
+  sha256: 0cf22c05d3167a81a89adf8d38d515decbe55889b2f6c81630128382a868091c
   requires_dist:
   - google-api-python-client>=2.149.0
   - google-auth-httplib2>=0.2.0

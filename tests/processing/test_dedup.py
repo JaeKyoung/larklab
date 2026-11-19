@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+from builders import scholar_paper
+
 from larklab.models import ScholarPaper
 from larklab.processing.dedup import dedup_and_group_by_date
 
@@ -7,15 +9,7 @@ NOON = datetime(2026, 11, 16, 12, tzinfo=UTC)
 
 
 def _paper(title: str, received_at: datetime | None = NOON) -> ScholarPaper:
-    return ScholarPaper(
-        title=title,
-        authors=[],
-        journal="",
-        abstract="",
-        url="",
-        source_email_id="m",
-        received_at=received_at,
-    )
+    return scholar_paper(title, received_at=received_at)
 
 
 def test_repeated_titles_are_dropped_ignoring_case_and_spacing():

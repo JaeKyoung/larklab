@@ -1,6 +1,5 @@
-from datetime import UTC, datetime
-
 import pytest
+from builders import scholar_paper
 
 from larklab.models import Paper, ScholarPaper
 from larklab.processing.abstract_enricher import enrich_abstracts
@@ -31,16 +30,7 @@ def sources(monkeypatch, sleeps):
 
 
 def _snippet_paper(url="https://doi.org/10.1000/abc", **fields) -> ScholarPaper:
-    return ScholarPaper(
-        title="A Paper",
-        authors=[],
-        journal="",
-        abstract="short snippet",
-        url=url,
-        source_email_id="m1",
-        received_at=datetime(2026, 11, 16, tzinfo=UTC),
-        **fields,
-    )
+    return scholar_paper(abstract="short snippet", url=url, **fields)
 
 
 def _record(abstract="", doi="") -> Paper:

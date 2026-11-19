@@ -62,6 +62,8 @@ def config(tmp_path):
         token_path=str(tmp_path / "token.json"),
         slack_bot_token="",
         db_path=str(tmp_path / "library.db"),
+        crawl_progress_path=str(tmp_path / "crawl_progress.json"),
+        outbox_path=str(tmp_path / "outbox.json"),
     )
 
 

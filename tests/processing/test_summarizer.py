@@ -1,8 +1,7 @@
 """The summarizer against a fake Ollama client: no model is ever loaded."""
 
-from datetime import UTC, datetime
-
 import pytest
+from builders import scholar_paper
 
 from larklab.models import ScholarPaper
 from larklab.processing import summarizer
@@ -31,15 +30,7 @@ def ollama_client(monkeypatch):
 
 
 def _paper(abstract: str = "We fold proteins.") -> ScholarPaper:
-    return ScholarPaper(
-        title="Folding",
-        authors=[],
-        journal="",
-        abstract=abstract,
-        url="https://example.com/folding",
-        source_email_id="m1",
-        received_at=datetime(2026, 11, 16, tzinfo=UTC),
-    )
+    return scholar_paper("Folding", abstract=abstract)
 
 
 def test_a_paper_without_an_abstract_is_not_sent_to_the_model(ollama_client):

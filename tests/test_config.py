@@ -4,7 +4,9 @@ from larklab.config import Config, load_config
 
 def test_the_slack_token_never_shows_up_in_repr_or_tracebacks():
     secret = "xoxb-super-secret"
-    settings = Config("creds.json", "token.json", secret, "library.db")
+    settings = Config(
+        "creds.json", "token.json", secret, "library.db", "progress.json", "outbox.json"
+    )
 
     assert secret not in repr(settings)
     assert secret not in str(settings)
@@ -23,3 +25,5 @@ def test_settings_come_from_the_environment(monkeypatch, tmp_path):
     assert settings.token_path == str(tmp_path / "token.json")  # absolute paths stay
     assert settings.credentials_path.endswith("credentials/credentials.json")
     assert settings.db_path.endswith("data/larklab.db")
+    assert settings.crawl_progress_path.endswith("data/crawl_progress.json")
+    assert settings.outbox_path.endswith("data/outbox.json")

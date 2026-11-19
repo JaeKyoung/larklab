@@ -60,10 +60,10 @@ src/larklab/
 │   │   ├── client.py            GmailClient: OAuth, list/fetch, parse (facade), trash
 │   │   └── scholar_alert_parser.py  Scholar alert HTML → ScholarPaper (fragile, isolated)
 │   └── papers/                  one module per source, same shape: fetch_by_*(…) -> Paper | None
-│       ├── pubmed_source.py     E-utilities (retries 429/5xx, structured abstracts joined)
 │       ├── crossref_source.py   REST API (journal, or posting institution for preprints)
 │       ├── arxiv_source.py      fetch by ID + crawl_recent (resumes after `since`)
 │       ├── biorxiv_source.py    fetch by DOI + crawl_recent (retries timeouts)
+│       ├── pubmed_source.py     E-utilities: fetch by DOI/title, crawl_recent (a US-Eastern day at a time)
 │       ├── web_page_source.py   citation_* meta tags and site-specific abstract parsers
 │       └── metadata_lookup.py   fetch_paper_metadata(doi, url): merges the sources
 │
@@ -112,7 +112,7 @@ scripts/manual/                  hand-run helpers that touch live Gmail / Slack
 
 ### `db-add`
 
-`fetch_paper_metadata` → preview and missing-field warning → confirmation → embedding → `find_duplicates` (same title, or cosine distance < 0.2) with a per-match `update` / `new` / `skip` prompt → `PaperRepository.add`.
+`fetch_paper_metadata` → preview and missing-field warning → confirmation → embedding → `find_duplicates` (same title, or cosine similarity above 0.8) with a per-match `update` / `new` / `skip` prompt → `PaperRepository.add`.
 
 ## Key design decisions
 
@@ -126,15 +126,16 @@ scripts/manual/                  hand-run helpers that touch live Gmail / Slack
 
 ### Recommendations resume, and nothing is lost on the way
 
-arXiv's API lists a paper only after it is *announced* (Sunday to Thursday evening, US Eastern). At 09:00 in Korea the newest visible paper is one to three days old, so a fixed "yesterday" window was always empty — arXiv never showed up in Slack, weekday or weekend. Instead `pipelines/crawl_progress.py` keeps one timestamp per source in `data/crawl_progress.json`, and each run asks only for papers newer than that mark (at most a week back), so a paper is recommended once and a skipped day is caught up.
+arXiv's API lists a paper only after it is *announced* (Sunday to Thursday evening, US Eastern). At 09:00 in Korea the newest visible paper is one to three days old, so a fixed "yesterday" window was always empty — arXiv never showed up in Slack, weekday or weekend. Instead `pipelines/crawl_progress.py` keeps one entry per source in `data/crawl_progress.json` (the time of the newest paper handled), and each run asks only for papers newer than that mark (at most a week back), so a paper is recommended once and a skipped day is caught up. The sources are read at the same time (one thread each), so the slowest sets the duration.
 
 Three rules keep papers from disappearing:
 
 1. **A crawl reports whether it read everything** (`CrawlResult.complete`). If an arXiv category failed or the bioRxiv API kept timing out, that source's mark does not move and it is fetched again next time — a repeat is better than a gap.
 2. **Undelivered recommendations are queued.** `send_recommendations_to_slack` returns the recommendations it could not post (a failed thread, or individual failed cards). `pipelines/outbox.py` stores them in `data/outbox.json`; the next run posts them together with the new ones, even when nothing new was found, and the file shrinks or disappears as Slack accepts them. Entries older than two weeks are dropped.
-3. **Order of saving:** the outbox file is written first, then the progress mark, so a crash between them can only cause a repeat.
+3. **Order of saving:** the outbox file is written first, then the progress mark, so a crash between them can only cause a repeat. This order lives in `run_recommendations` (`pipelines/paper_recommendations.py`), which the command and a future bot both call; it also drops waiting recommendations whose paper was added to the library since. The state file paths come from `Config`.
+4. **Late announcements:** arXiv can list a paper after newer ones (one held for moderation). arXiv is therefore read two days further back than its mark, and `crawl_progress.json` keeps the DOIs of that stretch (`SourceProgress.seen`) so nothing is recommended twice. A paper held for longer than the overlap is still missed.
 
-A `--no-slack` run is a dry run: it prints the outbox and the new recommendations and saves nothing. A missing or corrupt state file means "start fresh". bioRxiv publishes whole days, so it resumes at the day after the last one seen.
+A `--no-slack` run is a dry run (`send=None`): it prints the outbox and the new recommendations and saves nothing. A missing or corrupt state file means "start fresh". bioRxiv publishes whole days, so it resumes at the day after the last one seen.
 
 ### Configuration separation
 
@@ -180,7 +181,7 @@ Gmail reads and trashing go out as batch requests of `BATCH_SIZE` (20) calls eac
 | JSON export for scheduled agents | `outputs/digest_json.py` (`--output-json`) |
 | Duplicate detection | `PaperRepository.find_duplicates`, `cli/library/add.py` |
 | Multi-source metadata | `sources/papers/metadata_lookup.py` |
-| Recommendations from arXiv / bioRxiv, each paper once | `sources/papers/*_source.py`, `pipelines/paper_recommendations.py`, `pipelines/crawl_progress.py`, `outputs/slack/recommendations.py` — see [crawl-categories.md](crawl-categories.md) |
+| Recommendations from arXiv / bioRxiv / PubMed, each paper once | `sources/papers/*_source.py`, `pipelines/paper_recommendations.py`, `pipelines/crawl_progress.py`, `outputs/slack/recommendations.py` — see [crawl-categories.md](crawl-categories.md) |
 
 ### Planned
 
@@ -194,5 +195,6 @@ Gmail reads and trashing go out as batch requests of `BATCH_SIZE` (20) calls eac
 - **Abstract coverage**: papers not indexed in PubMed and hosted on JavaScript-rendered or bot-protected sites keep the short snippet from the email.
 - **bioRxiv crawl only**: medRxiv is not crawled.
 - **`papers.md` is lossy** (titles and DOIs). `db-import --md` re-fetches metadata over the network and may differ from the original; use `db-export` JSON or the `.db` file for faithful backups.
+- **Two `recommend` runs must not overlap**: they share `crawl_progress.json` and `outbox.json` and there is no lock, so keep the cron times apart (a manual run during the hour-long PubMed run could overwrite the other's marks).
 - **State files are per checkout**: if you run `recommend` from two checkouts, each keeps its own `data/crawl_progress.json` and `data/outbox.json`.
 - **A source that keeps failing repeats**: if one arXiv category fails every day, the whole arXiv source is re-fetched every day (watch for `arXiv crawl stopped` in the log). Per-category marks would avoid this at the cost of more state.

@@ -1,6 +1,7 @@
 import math
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from larklab.library import embedder
@@ -50,8 +51,53 @@ def test_paper_text_is_title_then_abstract(make_paper):
     assert embedder.paper_embedding_text(paper) == "The Title\nThe abstract."
 
 
-def test_a_hung_ollama_cannot_block_cron_forever():
+def test_a_hung_ollama_cannot_block_cron_forever(monkeypatch):
     """Regression: the default client has no timeout at all."""
-    timeout = embedder._client._client.timeout
+    monkeypatch.setattr(embedder, "_client", None)  # as at start-up: not built yet
+    timeout = embedder._ollama_client()._client.timeout
 
     assert timeout.read is not None and timeout.read <= 300
+
+
+def _flaky_ollama(monkeypatch, failures, error=None):
+    """Ollama stand-in whose first `failures` requests fail."""
+    calls = []
+
+    def embed(model, input):
+        calls.append(len(input))
+        if len(calls) <= failures:
+            raise error or httpx.ReadTimeout("took too long")
+        return {"embeddings": [[3.0, 4.0] + [0.0] * 4094 for _ in input]}
+
+    monkeypatch.setattr(embedder, "_client", SimpleNamespace(embed=embed))
+    return calls
+
+
+def test_a_slow_request_is_retried_instead_of_losing_the_whole_run(
+    monkeypatch, make_paper, sleeps
+):
+    calls = _flaky_ollama(monkeypatch, failures=2)
+
+    embeddings = embed_papers([make_paper("One")])
+
+    assert len(embeddings) == 1
+    assert calls == [1, 1, 1]  # two failures, then the answer
+    assert sleeps == [5, 10]  # a growing pause between attempts
+
+
+def test_a_request_that_keeps_failing_is_given_up_on(monkeypatch, make_paper):
+    calls = _flaky_ollama(monkeypatch, failures=99)
+
+    with pytest.raises(httpx.ReadTimeout):
+        embed_papers([make_paper("One")])
+
+    assert len(calls) == embedder._ATTEMPTS
+
+
+def test_a_long_run_logs_how_far_it_has_got(fake_ollama, make_paper, caplog):
+    papers = [make_paper(f"Paper {i}") for i in range(32 * 10 + 5)]
+
+    with caplog.at_level("INFO", logger="larklab.library.embedder"):
+        embed_papers(papers)
+
+    assert caplog.messages == ["  Embedded 320/325 papers..."]  # after the 10th batch

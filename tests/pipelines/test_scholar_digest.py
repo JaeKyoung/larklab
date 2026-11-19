@@ -1,5 +1,7 @@
 import logging
-from datetime import UTC, date, datetime
+from datetime import date
+
+from builders import scholar_paper
 
 from larklab.models import DailyDigest, ScholarPaper
 from larklab.pipelines import scholar_digest as digest_pipeline
@@ -32,16 +34,7 @@ def test_group_into_batches_splits_on_gaps_and_puts_newest_first():
 
 
 def _scholar_paper(title: str, **fields) -> ScholarPaper:
-    return ScholarPaper(
-        title=title,
-        authors=[],
-        journal="",
-        abstract="snippet",
-        url=f"https://example.com/{title}",
-        source_email_id="m1",
-        received_at=datetime(2026, 11, 16, 8, tzinfo=UTC),
-        **fields,
-    )
+    return scholar_paper(title, abstract="snippet", **fields)
 
 
 class FakeGmail:

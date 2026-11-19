@@ -10,8 +10,6 @@ from dotenv import load_dotenv
 # Three levels up from this file: src/larklab/config.py -> project root
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
-CRAWL_PROGRESS_PATH = DATA_DIR / "crawl_progress.json"
-OUTBOX_PATH = DATA_DIR / "outbox.json"
 
 
 @dataclass(frozen=True)
@@ -20,6 +18,8 @@ class Config:
     token_path: str
     slack_bot_token: str = field(repr=False)  # keep the secret out of logs
     db_path: str
+    crawl_progress_path: str  # how far each source has been read
+    outbox_path: str  # recommendations Slack refused
 
 
 def load_config() -> Config:
@@ -32,6 +32,8 @@ def load_config() -> Config:
         token_path=_resolve_project_path("GMAIL_TOKEN_PATH", "credentials/token.json"),
         slack_bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
         db_path=str(DATA_DIR / "larklab.db"),
+        crawl_progress_path=str(DATA_DIR / "crawl_progress.json"),
+        outbox_path=str(DATA_DIR / "outbox.json"),
     )
 
 

@@ -1,155 +1,138 @@
-"""`recommend` is a cron job: it must not lose or repeat papers. Nothing is posted."""
+"""The `recommend` command only wires options to the pipeline; nothing is posted.
+The delivery rules (outbox, resume points) are tested in tests/pipelines."""
 
 import importlib
-from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
+from builders import recommendation
 from click.testing import CliRunner
 
-from larklab.models import Paper, Recommendation, RecommendationResult
-from larklab.pipelines.crawl_progress import advance_progress, load_progress
-from larklab.pipelines.outbox import load_outbox, save_outbox
+from larklab.models import RecommendationResult
+from larklab.pipelines.paper_recommendations import RecommendationRun
 
 recommend_cli = importlib.import_module("larklab.cli.recommend")
 
-NOW = datetime.now(UTC)
-NEWEST = NOW - timedelta(days=1)
-EARLIER = NOW - timedelta(days=2)
 
-
-def _recommendation(title: str, score: float = 0.8) -> Recommendation:
-    paper = Paper(
-        title=title,
-        authors=["A"],
-        journal="arXiv",
-        abstract="abs",
-        doi=f"10.48550/arXiv.{title}",
-        published_at=NEWEST,
-    )
-    return Recommendation(paper=paper, similar_papers=[("Reference", score)])
-
-
-def _result(*recommendations: Recommendation, newest=NEWEST) -> RecommendationResult:
-    return RecommendationResult(
-        recommendations=list(recommendations),
-        candidate_counts={},
-        newest_published={"arxiv": newest} if newest else {},
-    )
+def _run_with(*titles: str, undelivered=()) -> RecommendationRun:
+    recommendations = [recommendation(title) for title in titles]
+    shown = RecommendationResult(recommendations, candidate_counts={})
+    return RecommendationRun(shown, list(undelivered))
 
 
 @pytest.fixture
-def invoke(config, monkeypatch, tmp_path):
+def invoke(config, monkeypatch):
     """Run `recommend` with a fake pipeline and a fake Slack: nothing is posted."""
-    progress_path, outbox_path = tmp_path / "progress.json", tmp_path / "outbox.json"
-    seen = {"since": None, "sent": []}
-    behaviour = {"result": _result(_recommendation("New")), "undelivered": []}
+    seen = {"options": None, "slack": []}
+    behaviour = {"run": _run_with("New")}
 
-    def fake_recommend(repository, **options):
-        seen["since"] = options["since"]
-        return behaviour["result"]
+    def fake_run(repository, **options):
+        seen["options"] = options
+        if options["send"] is not None:  # a real run asks Slack to post
+            options["send"](behaviour["run"].shown)
+        return behaviour["run"]
 
     def fake_slack(result, **kwargs):
-        seen["sent"].append([r.paper.title for r in result.recommendations])
-        return (
-            behaviour["undelivered"](result)
-            if callable(behaviour["undelivered"])
-            else []
-        )
+        seen["slack"].append(kwargs)
+        return []
 
     monkeypatch.setattr(recommend_cli, "load_config", lambda: config)
-    monkeypatch.setattr(recommend_cli, "CRAWL_PROGRESS_PATH", progress_path)
-    monkeypatch.setattr(recommend_cli, "OUTBOX_PATH", outbox_path)
-    monkeypatch.setattr(recommend_cli, "recommend_papers", fake_recommend)
+    monkeypatch.setattr(recommend_cli, "run_recommendations", fake_run)
     monkeypatch.setattr(recommend_cli, "send_recommendations_to_slack", fake_slack)
 
-    def run(*args, **settings):
-        behaviour.update(settings)
+    def run(*args, outcome=None):
+        if outcome is not None:
+            behaviour["run"] = outcome
         result = CliRunner().invoke(recommend_cli.recommend, list(args))
         return result, seen
 
-    run.progress_path, run.outbox_path = progress_path, outbox_path
     return run
 
 
-def test_a_delivered_run_moves_the_resume_point_and_leaves_nothing_waiting(invoke):
-    result, seen = invoke()
+def test_the_pipeline_gets_the_state_files_from_the_config(invoke, config):
+    _, seen = invoke()
 
-    assert "New" in result.output
-    assert seen["sent"] == [["New"]]
-    assert load_progress(invoke.progress_path) == {"arxiv": NEWEST}
-    assert not invoke.outbox_path.exists()
+    assert seen["options"]["progress_path"] == Path(config.crawl_progress_path)
+    assert seen["options"]["outbox_path"] == Path(config.outbox_path)
 
 
-def test_recommendations_slack_refused_are_kept_and_the_run_still_moves_on(invoke):
-    result, _ = invoke(
-        result=_result(_recommendation("Sent"), _recommendation("Refused")),
-        undelivered=lambda outgoing: [
-            r for r in outgoing.recommendations if r.paper.title == "Refused"
-        ],
-    )
+def test_recommendations_are_printed(invoke):
+    result, _ = invoke(outcome=_run_with("Alpha", "Beta"))
 
-    assert [r.paper.title for r in load_outbox(invoke.outbox_path)] == ["Refused"]
-    assert load_progress(invoke.progress_path) == {
-        "arxiv": NEWEST
-    }  # safe: it is queued
+    assert "Alpha" in result.output and "Beta" in result.output
+
+
+def test_nothing_to_show_prints_nothing(invoke):
+    result, _ = invoke(outcome=_run_with())
+
+    assert result.output == ""
+
+
+def test_recommendations_slack_refused_are_reported(invoke):
+    refused = _run_with("Sent", "Refused").shown.recommendations[1:]
+
+    result, _ = invoke(outcome=_run_with("Sent", "Refused", undelivered=refused))
+
     assert "1 recommendation(s) could not be posted" in result.output
 
 
-def test_waiting_recommendations_go_out_with_the_next_run(invoke):
-    save_outbox(invoke.outbox_path, [_recommendation("Waiting", score=0.9)])
+def test_the_channel_and_token_reach_slack(invoke, config):
+    _, seen = invoke("--channel", "reading-group")
 
-    _, seen = invoke(result=_result(_recommendation("New", score=0.6)))
-
-    assert seen["sent"] == [["Waiting", "New"]]  # together, best first
-    assert not invoke.outbox_path.exists()  # delivered, so it is deleted
-
-
-def test_waiting_recommendations_are_sent_even_when_nothing_new_was_found(invoke):
-    save_outbox(invoke.outbox_path, [_recommendation("Waiting")])
-
-    _, seen = invoke(result=_result(newest=None))
-
-    assert seen["sent"] == [["Waiting"]]
-    assert not invoke.outbox_path.exists()
+    assert seen["slack"] == [
+        {"token": config.slack_bot_token, "channel": "reading-group"}
+    ]
 
 
-def test_nothing_new_and_nothing_waiting_posts_no_empty_thread(invoke):
-    _, seen = invoke(result=_result())
-
-    assert seen["sent"] == []
-    assert load_progress(invoke.progress_path) == {"arxiv": NEWEST}  # crawl was fine
-
-
-def test_a_dry_run_prints_everything_and_remembers_nothing(invoke):
-    save_outbox(invoke.outbox_path, [_recommendation("Waiting")])
-
+def test_a_dry_run_gives_the_pipeline_no_way_to_send(invoke):
     result, seen = invoke("--no-slack")
 
-    assert "Waiting" in result.output and "New" in result.output
-    assert seen["sent"] == []
-    assert load_progress(invoke.progress_path) == {}
-    assert [r.paper.title for r in load_outbox(invoke.outbox_path)] == ["Waiting"]
+    assert seen["options"]["send"] is None
+    assert seen["slack"] == []
+    assert "New" in result.output  # but everything is still printed
 
 
-def test_earlier_progress_is_handed_to_the_pipeline_and_never_rewound(invoke):
-    advance_progress(invoke.progress_path, {"arxiv": NEWEST, "biorxiv": EARLIER})
+def test_without_a_source_every_source_is_read(invoke):
+    _, seen = invoke()
 
-    _, seen = invoke(result=_result(newest=EARLIER))
-
-    assert seen["since"] == {"arxiv": NEWEST, "biorxiv": EARLIER}
-    assert load_progress(invoke.progress_path) == {"arxiv": NEWEST, "biorxiv": EARLIER}
+    assert seen["options"]["sources"] == ["arxiv", "biorxiv", "pubmed"]
 
 
-def test_a_source_that_was_not_read_completely_keeps_its_old_resume_point(invoke):
-    advance_progress(invoke.progress_path, {"arxiv": EARLIER})
+def test_sources_can_be_chosen_and_are_read_in_the_order_given(invoke):
+    _, seen = invoke("biorxiv", "arxiv")
+    assert seen["options"]["sources"] == ["biorxiv", "arxiv"]
 
-    invoke(result=_result(newest=None))  # the pipeline left arxiv out: crawl incomplete
+    _, seen = invoke("pubmed")
+    assert seen["options"]["sources"] == ["pubmed"]
 
-    assert load_progress(invoke.progress_path) == {"arxiv": EARLIER}
 
-
-def test_categories_need_a_source(invoke):
-    result, _ = invoke("--categories", "cs.LG")
+def test_an_unknown_source_is_refused(invoke):
+    result, seen = invoke("medrxiv")
 
     assert result.exit_code == 2
-    assert "requires a source" in result.output
+    assert seen["options"] is None  # nothing was crawled
+
+
+@pytest.mark.parametrize("sources", [[], ["arxiv", "pubmed"]])
+def test_categories_need_exactly_one_source(invoke, sources):
+    result, seen = invoke(*sources, "--categories", "cs.LG")
+
+    assert result.exit_code == 2
+    assert "exactly one source" in result.output
+    assert seen["options"] is None
+
+
+@pytest.mark.parametrize("days", ["0", "-2"])
+def test_days_back_must_be_at_least_one(invoke, days):
+    result, seen = invoke("--days-back", days)
+
+    assert result.exit_code == 2
+    assert seen["options"] is None
+
+
+def test_categories_go_with_a_single_source(invoke):
+    result, seen = invoke("pubmed", "--categories", "Protein science, Bioinformatics")
+
+    assert result.exit_code == 0
+    assert seen["options"]["sources"] == ["pubmed"]
+    assert seen["options"]["categories"] == ["Protein science", "Bioinformatics"]
