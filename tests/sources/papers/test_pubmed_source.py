@@ -106,6 +106,10 @@ def test_gives_up_after_repeated_server_errors(http_client):
 YESTERDAY = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
 
 
+def _midnight(day) -> datetime:
+    return datetime(day.year, day.month, day.day, tzinfo=UTC)
+
+
 def _article(
     pmid,
     title="A Paper",
@@ -328,9 +332,11 @@ def test_a_busy_day_is_fetched_in_batches_of_records(pubmed, monkeypatch):
     assert [len(ids) for ids in fake.fetched] == [2, 2, 1]
 
 
-def test_a_day_with_more_papers_than_one_search_can_return_says_so(
+def test_a_day_with_more_papers_than_one_search_can_return_says_how_many_are_skipped(
     pubmed, monkeypatch, caplog
 ):
+    """A search returns 10000 at most. The rest is skipped aloud, and the crawl still
+    moves past the day: stopping there would keep it from ever getting further."""
     monkeypatch.setattr(pubmed_source, "_MAX_IDS", 2)
     pubmed({YESTERDAY: [_article(n, f"Paper {n}", doi=f"10.1/{n}") for n in range(3)]})
 
@@ -338,7 +344,8 @@ def test_a_day_with_more_papers_than_one_search_can_return_says_so(
         crawl = pubmed_source.crawl_recent()
 
     assert len(crawl.papers) == 2
-    assert "only the first 2 papers can be read" in caplog.text
+    assert "only the first 2 can be read; the other 1 are skipped" in caplog.text
+    assert crawl.read_until is not None
 
 
 def test_a_crawl_resumes_the_day_after_the_last_one_handled(pubmed):
@@ -383,6 +390,36 @@ def test_a_failing_day_keeps_the_days_before_it_and_marks_the_crawl_incomplete(p
 
     assert [p.title for p in crawl.papers] == ["Safe"]
     assert crawl.complete is False
+    # ...and says it read up to the day before the failing one, so that is where the
+    # next run resumes: the safe day is not read, embedded and posted again
+    assert crawl.read_until == _midnight(day_before)
+
+
+def test_a_crawl_says_it_read_up_to_the_last_day_read_in_full(pubmed):
+    day_before = YESTERDAY - timedelta(days=1)
+    pubmed(
+        {day_before: [_article(1, "A")], YESTERDAY: [_article(2, "B", doi="10.1/b")]}
+    )
+
+    crawl = pubmed_source.crawl_recent(days_back=2)
+
+    assert crawl.complete is True
+    assert crawl.read_until == _midnight(YESTERDAY)
+
+
+def test_a_day_without_papers_still_counts_as_read(pubmed):
+    pubmed({})
+
+    assert pubmed_source.crawl_recent().read_until == _midnight(YESTERDAY)
+
+
+def test_when_the_first_day_fails_nothing_was_read(pubmed):
+    pubmed({YESTERDAY: [_article(1, "Lost")]}, failing=[YESTERDAY])
+
+    crawl = pubmed_source.crawl_recent()
+
+    assert crawl.complete is False
+    assert crawl.read_until is None
 
 
 def test_a_paper_listed_on_two_days_is_returned_once(pubmed):

@@ -36,14 +36,20 @@ def _crawled(
     )
 
 
-def _fake_crawlers(monkeypatch, incomplete=(), **papers_by_source):
-    """Crawlers that return fixed papers and remember the `since` they were given."""
+def _fake_crawlers(monkeypatch, incomplete=(), read_until=None, **papers_by_source):
+    """Crawlers that return fixed papers and remember the `since` they were given.
+    `read_until` says per source how far its crawl reports having read."""
     seen_since: dict[str, datetime | None] = {}
+    read_until = read_until or {}
 
     def crawler(name, papers):
         def crawl_recent(categories, days_back, since=None):
             seen_since[name] = since
-            return CrawlResult(papers, complete=name not in incomplete)
+            return CrawlResult(
+                papers,
+                complete=name not in incomplete,
+                read_until=read_until.get(name),
+            )
 
         return SimpleNamespace(DEFAULT_CATEGORIES=["cat"], crawl_recent=crawl_recent)
 
@@ -404,3 +410,104 @@ def test_a_source_that_could_not_be_read_completely_keeps_its_old_resume_point(
 
     assert {r.paper.title for r in result.recommendations} == {"Half read", "Whole"}
     assert list(result.progress) == ["biorxiv"]  # arxiv is left out
+
+
+# --- how far a source was read, and which reading a resume point belongs to ----------
+
+
+def test_a_source_that_says_how_far_it_read_moves_exactly_that_far(
+    repository, make_paper, one_hot, monkeypatch
+):
+    """PubMed reads whole days: the resume point is the last day read, not the time
+    of some paper, and a day without a single usable paper still counts."""
+    repository.add(make_paper("Reference", embedding=one_hot(0)))
+    last_day = datetime(2026, 11, 14, tzinfo=UTC)
+    _fake_crawlers(
+        monkeypatch,
+        pubmed=[_crawled("Early", "10.1/e", day=date(2026, 11, 12))],
+        read_until={"pubmed": last_day},
+    )
+    _score_by_title(monkeypatch, {"Early": 0.1})
+
+    result = _recommend(repository, sources=("pubmed",))
+
+    assert result.progress == {"pubmed": SourceProgress(last_day)}
+
+
+def test_a_source_read_for_days_that_had_no_papers_still_moves_on(
+    repository, make_paper, one_hot, monkeypatch
+):
+    repository.add(make_paper("Reference", embedding=one_hot(0)))
+    last_day = datetime(2026, 11, 14, tzinfo=UTC)
+    _fake_crawlers(monkeypatch, pubmed=[], read_until={"pubmed": last_day})
+
+    assert _recommend(repository, sources=("pubmed",)).progress == {
+        "pubmed": SourceProgress(last_day)
+    }
+
+
+def test_an_incomplete_crawl_keeps_the_part_it_read(
+    repository, make_paper, one_hot, monkeypatch
+):
+    """A failing day must not make the next run read, embed and post the days before
+    it again."""
+    repository.add(make_paper("Reference", embedding=one_hot(0)))
+    day_read = datetime(2026, 11, 13, tzinfo=UTC)
+    _fake_crawlers(
+        monkeypatch,
+        incomplete=("pubmed",),
+        read_until={"pubmed": day_read},
+        pubmed=[_crawled("Safe", "10.1/s", day=date(2026, 11, 13))],
+    )
+    _score_by_title(monkeypatch, {"Safe": 0.9})
+
+    result = _recommend(repository, sources=("pubmed",))
+
+    assert [r.paper.title for r in result.recommendations] == ["Safe"]
+    assert result.progress == {"pubmed": SourceProgress(day_read)}
+
+
+def test_reading_other_journals_has_a_resume_point_of_its_own(
+    repository, make_paper, one_hot, monkeypatch
+):
+    """Regression: after `pubmed -c Bioinformatics`, a run over all of PubMed resumed
+    from that run's point and never read what the first one had skipped."""
+    repository.add(make_paper("Reference", embedding=one_hot(0)))
+    seen_since = _fake_crawlers(
+        monkeypatch, pubmed=[_crawled("P", "10.1/p", day=date(2026, 11, 14))]
+    )
+    _score_by_title(monkeypatch, {"P": 0.1})
+    narrow = SourceProgress(datetime(2026, 11, 13, tzinfo=UTC))
+
+    result = _recommend(
+        repository,
+        sources=("pubmed",),
+        categories=["Bioinformatics"],
+        progress={"pubmed": SourceProgress(datetime(2026, 11, 1, tzinfo=UTC))},
+    )
+
+    assert seen_since["pubmed"] is None  # not the point of the all-journals reading
+    assert list(result.progress) == ["pubmed:bioinformatics"]
+
+    _recommend(
+        repository,
+        sources=("pubmed",),
+        categories=["Bioinformatics"],
+        progress={"pubmed:bioinformatics": narrow},
+    )
+    assert seen_since["pubmed"] == narrow.newest  # ...but its own point is used
+
+    _recommend(
+        repository, sources=("pubmed",), progress={"pubmed:bioinformatics": narrow}
+    )
+    assert seen_since["pubmed"] is None  # the all-journals reading has none yet
+
+
+def test_the_same_journals_in_any_order_or_case_share_a_resume_point():
+    key = pipeline._progress_key
+
+    assert key("pubmed", ["Chem Sci", " bioinformatics"]) == key(
+        "pubmed", ["Bioinformatics", "chem sci"]
+    )
+    assert key("pubmed", None) == "pubmed"
+    assert key("pubmed", ["Chem Sci"]) != key("arxiv", ["Chem Sci"])

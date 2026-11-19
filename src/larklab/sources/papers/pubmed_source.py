@@ -58,10 +58,10 @@ def crawl_recent(
     abbreviations; without them every paper that has an abstract and a DOI comes
     back (3000 to 6000 a day), except preprints. Days are PubMed's own (US Eastern)
     and only finished days are read, so a paper indexed late in the evening is not
-    skipped. The crawl
-    never stops in the middle of a day, so `max_results` can be passed by one day.
-    The result is marked incomplete when PubMed kept failing, so the caller does
-    not treat the papers as seen.
+    skipped. The crawl never stops in the middle of a day, so `max_results` can be
+    passed by one day. `read_until` is the last day read in full, where the next run
+    resumes; when PubMed keeps failing on a day the result is marked incomplete, but
+    the days before it still count.
     """
     window = crawl_window(
         datetime.now(_PUBMED_TIMEZONE).date() - timedelta(days=1), days_back, since
@@ -72,6 +72,7 @@ def crawl_recent(
 
     papers: dict[str, Paper] = {}  # by normalized title: the first one wins
     complete = True
+    read_until = None
     with build_http_client(timeout=60) as client:
         journal_terms = _journal_terms(client, categories or [])
         if categories and not journal_terms:
@@ -83,8 +84,13 @@ def crawl_recent(
                 break
             for paper in day_papers:
                 papers.setdefault(normalize_title(paper.title), paper)
+            read_until = _start_of(day)
             day += timedelta(days=1)
-    return CrawlResult(list(papers.values()), complete=complete)
+    return CrawlResult(list(papers.values()), complete=complete, read_until=read_until)
+
+
+def _start_of(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, tzinfo=UTC)
 
 
 def _papers_added_on(
@@ -96,11 +102,19 @@ def _papers_added_on(
     if found is None:
         return None
     ids = found.get("idlist", [])
-    if int(found.get("count", 0)) > len(ids):
+    total = int(found.get("count", 0))
+    if total > len(ids):
+        # One search cannot return more, and stopping here would keep the crawl from
+        # ever getting past this day (bulk loads of old records can exceed it).
         logger.warning(
-            "PubMed %s: only the first %d papers can be read.", day, len(ids)
+            "PubMed %s: %d papers, but only the first %d can be read; the other %d "
+            "are skipped.",
+            day,
+            total,
+            len(ids),
+            total - len(ids),
         )
-    added_at = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    added_at = _start_of(day)  # the day PubMed added the paper: what Slack shows
     papers = []
     for chunk in batched(ids, _FETCH_BATCH_SIZE):
         response = _get(client, _EFETCH_URL, _efetch_params(chunk))

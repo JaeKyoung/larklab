@@ -10,6 +10,7 @@ from larklab.pipelines import paper_recommendations as pipeline
 from larklab.pipelines.crawl_progress import advance_progress, load_progress
 from larklab.pipelines.outbox import load_outbox, save_outbox
 from larklab.pipelines.paper_recommendations import run_recommendations
+from larklab.utils.files import LockBusy, exclusive_lock
 
 NOW = datetime.now(UTC)
 NEWEST = NOW - timedelta(days=1)
@@ -159,3 +160,28 @@ def test_a_source_that_was_not_read_completely_keeps_its_old_resume_point(run):
     run(result=_result(newest=None))  # the pipeline left arxiv out: crawl incomplete
 
     assert load_progress(run.progress_path) == {"arxiv": SourceProgress(EARLIER)}
+
+
+def test_a_run_that_saves_refuses_to_start_while_another_one_is_going(run):
+    """Regression: two runs read the state files, then each wrote its own version, so
+    one run's waiting Slack recommendations could be erased by the other."""
+    with exclusive_lock(run.progress_path.with_name("recommend.lock")):
+        with pytest.raises(LockBusy):
+            run()
+        _, seen = run(dry_run=True)  # looking changes nothing, so it may go on
+
+    assert seen["send_calls"] == 0
+    assert load_progress(run.progress_path) == {}
+    assert load_outbox(run.outbox_path) == []
+
+
+def test_the_lock_is_free_again_after_a_run_even_a_failed_one(run):
+    run()
+
+    def refuse_to_deliver(result):
+        raise OSError("network down")
+
+    with pytest.raises(OSError):
+        run(undelivered=refuse_to_deliver)
+
+    run(undelivered=None)  # would raise LockBusy if either run had kept the lock

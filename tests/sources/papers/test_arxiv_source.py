@@ -96,6 +96,44 @@ def test_busy_categories_are_not_cut_off_at_a_few_hundred_papers():
     assert search_cls.call_args.kwargs["max_results"] >= 1000
 
 
+def test_a_category_that_hits_the_cap_before_the_cutoff_makes_the_crawl_incomplete():
+    """Regression: reading up to the cap counted as done, so the resume point moved
+    past the older papers that were never read."""
+    crawl = _crawl_returning(
+        [_result(f"Paper {n}", _ago(hours=n + 1)) for n in range(3)],  # all newer
+        categories=["cs.LG"],
+        max_results=3,
+    )
+
+    assert len(crawl.papers) == 3
+    assert crawl.complete is False
+
+
+def test_a_category_that_reaches_the_cutoff_is_complete_even_with_a_full_page():
+    crawl = _crawl_returning(
+        [
+            _result("New", _ago(days=1)),
+            _result("New too", _ago(days=2)),
+            _result("Old", _ago(days=30)),  # the cutoff: this is the third result
+        ],
+        categories=["cs.LG"],
+        max_results=3,
+    )
+
+    assert crawl.complete is True
+
+
+def test_one_capped_category_is_enough_to_make_the_crawl_incomplete():
+    crawl = _crawl_returning(
+        [_result("Quiet", _ago(days=1)), _result("Old", _ago(days=30))],
+        [_result(f"Busy {n}", _ago(hours=n + 1)) for n in range(3)],
+        categories=["cs.AI", "cs.LG"],
+        max_results=3,
+    )
+
+    assert crawl.complete is False
+
+
 # --- the window: arXiv lists papers only after they are announced -------------
 
 

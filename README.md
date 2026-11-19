@@ -79,7 +79,7 @@ Run it from cron (on macOS, launchd also works; see [docs/scheduling.md](docs/sc
 ```
 
 - `-n 999` posts every paper above the threshold instead of the top 20. PubMed is far larger, so it gets a higher threshold (`-t 0.6`).
-- Keep the two `recommend` lines an hour apart: they write the same state files.
+- Keep the two `recommend` lines an hour apart: they share state files, so a run that finds the other one still going exits at once and the next run catches up.
 - cron runs whatever branch is checked out in the project directory. Keep it on a stable branch and develop in a separate `git worktree`.
 
 ## Documentation

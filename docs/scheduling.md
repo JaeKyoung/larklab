@@ -15,7 +15,7 @@ crontab -e
 0 12 * * * cd /path/to/larklab && /path/to/pixi run recommend pubmed -t 0.6 -n 999 >> /tmp/larklab.log 2>&1
 ```
 
-`-n 999` posts every paper above the threshold instead of the top 20. `-t` is short for `--threshold`, the minimum similarity. PubMed is far larger than the other two sources, so it gets a higher threshold (`-t 0.6`); raise it if too many papers come through. Keep the two `recommend` lines an hour apart: they write the same state files.
+`-n 999` posts every paper above the threshold instead of the top 20. `-t` is short for `--threshold`, the minimum similarity. PubMed is far larger than the other two sources, so it gets a higher threshold (`-t 0.6`); raise it if too many papers come through. Keep the two `recommend` lines an hour apart: they share state files, so a run that finds the other one still going exits at once and the next run catches up.
 
 Progress is logged to stdout, so `/tmp/larklab.log` shows each stage. Check registration with `crontab -l`.
 

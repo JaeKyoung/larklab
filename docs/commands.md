@@ -21,7 +21,7 @@ Fetch Scholar alert emails, enrich them, and post a digest.
 | `--verbose` | off | Log each trashed email's subject |
 | `--output-json PATH` | none | Also write the digest as JSON for downstream automation |
 
-With `--cleanup`, processed emails are moved to Gmail's trash (recoverable) only after their digest was delivered. That includes an email whose papers were all repeats of papers in other emails; an email with a paper in a digest that failed to post stays in the inbox for the next run.
+With `--cleanup`, processed emails are moved to Gmail's trash (recoverable) only after their digest was delivered. That includes an email whose papers were all repeats of papers in other emails; an email with a paper in a digest that failed to post stays in the inbox for the next run. A digest counts as delivered only when its headline and every paper card were posted: if one card fails, the emails of that digest stay, and the next run posts the whole digest again (a repeat rather than a lost paper).
 
 ## `recommend [SOURCE...]`
 
@@ -38,12 +38,14 @@ Crawl recent papers and recommend the ones closest to your library. Name the sou
 
 Papers already in your library are skipped, matched by DOI or by title ignoring case and punctuation. Default categories are listed in [crawl-categories.md](crawl-categories.md).
 
+`-t` (`--threshold`, the minimum similarity) and `-n` are applied after every paper was embedded, so changing them does not shorten a run. What shortens it is reading fewer papers: pick the sources, or narrow PubMed with `-c`. The log says how long each source took to read and how long embedding took (`Read pubmed: ... in ...s`, `Embedded ... in ...s`).
+
 ### PubMed
 
 - Read one finished day at a time, by the date PubMed added each record (days are US Eastern, so a paper indexed in the evening is not skipped). Only papers with an abstract and a DOI count.
 - Without `--categories` that is every journal except preprints: about 3000 to 6000 papers a day, about 1.2 s each to embed, so one run takes one to two hours. Preprints are left out because PubMed adds bioRxiv, medRxiv and arXiv copies weeks late, hundreds in one day, while their own sources deliver them on time.
 - Narrow it with journals: `pixi run recommend pubmed -c "Bioinformatics,Chemical Science"`. Journals are separated by commas, so a full name that contains one ("Proteins: Structure, Function, and Bioinformatics") needs its abbreviation (`Proteins`).
-- A name may be PubMed's exact title or abbreviation, or any spelling PubMed can map by itself: `Protein science` is read as `Protein Sci`, and the log says so. A name PubMed cannot place is warned about and left out; if none can be placed, nothing is read (never all of PubMed).
+- A name may be PubMed's exact title or abbreviation, or any spelling PubMed can map by itself: `Protein science` is read as `Protein Sci`, and the log says so. A name PubMed cannot place is warned about and left out; if none can be placed, nothing is read (never all of PubMed). A different list of journals (or none) is a different reading with its own resume point, see below.
 - Papers are listed as `pubmed:<journal>` (`pubmed:Chem Sci`); the Slack headline shows only the journals that have a recommendation.
 - Everything a run reads is scored before anything is posted, so a slow PubMed run holds back the other sources' posts of the same run. Run PubMed on its own ([scheduling](scheduling.md)) and raise `-t` to keep only the closest papers.
 
@@ -51,7 +53,7 @@ Papers already in your library are skipped, matched by DOI or by title ignoring 
 
 Each paper is recommended once, and none is lost. `recommend` keeps two small files in `data/` (gitignored, safe to delete; their paths are set in `config.py`):
 
-- `crawl_progress.json` — the newest paper handled per source. The next run resumes after it and catches up on missed days (at most a week).
+- `crawl_progress.json` — how far each source was read. The next run resumes after it and catches up on missed days (at most a week). The default reading of a source is kept under its name (`arxiv`); reading other categories or journals is kept under its own entry (`pubmed:bioinformatics,chemical science`), so `pubmed -c Bioinformatics` and a run over all of PubMed never use each other's resume point. Changing the list starts that reading afresh from `--days-back`.
 - `outbox.json` — recommendations Slack refused. They are posted with the next run's recommendations (even when that run finds nothing new) and removed once Slack accepts them. Entries older than two weeks are dropped.
 
 The sources differ:
@@ -59,9 +61,11 @@ The sources differ:
 - **arXiv** lists a paper only after it is *announced* (Sunday to Thursday evening, US Eastern), so at breakfast time in Asia the newest paper is one to three days old and a fixed "yesterday" window is always empty. It can also list a paper after newer ones (held for moderation), so it is read two days further back than its mark and the papers of that stretch are remembered, to be recommended only once.
 - **bioRxiv** publishes whole days; it resumes at the day after the last one seen.
 
-A source's progress moves forward only when the crawl read everything: if one arXiv category failed (HTTP 429/503), the source is fetched again next time. You may see a few repeats, never a gap. A `--no-slack` run prints the pending and new recommendations and changes nothing.
+A source's progress moves forward only over what was read. arXiv and bioRxiv move only when the crawl read everything: if one arXiv category failed (HTTP 429/503), or had more than 3000 papers in the window so that its older ones were not read, the source is fetched again next time. PubMed reads day by day, so when a day fails it still moves up to the last day read in full. You may see a few repeats, never a gap. A `--no-slack` run prints the pending and new recommendations and changes nothing.
 
-Per-run limits: arXiv up to 1000 papers per category; PubMed one day at a time, stopping after the day that passes 4000 papers (a catch-up after missed days takes about a day per run); bioRxiv up to 200 matching papers, but never in the middle of a day. The design reasons are in [architecture.md](architecture.md#recommendations-resume-and-nothing-is-lost-on-the-way).
+**One saving run at a time.** A `recommend` that saves holds a lock (`data/recommend.lock`) while it runs. A second one exits at once with a message instead of overwriting the first one's state files; its sources are read again by the next run, so nothing is lost. `--no-slack` runs need no lock.
+
+Per-run limits: arXiv up to 3000 papers per category (a week's catch-up needs far fewer); PubMed one day at a time, stopping after the day that passes 4000 papers (a catch-up after missed days takes about a day per run); bioRxiv up to 200 matching papers, but never in the middle of a day. PubMed's search returns at most 10000 papers for one day; if a day has more (a bulk load of old records), the others are skipped with a warning, because stopping at that day would keep the crawl from ever getting past it. The design reasons are in [architecture.md](architecture.md#recommendations-resume-and-nothing-is-lost-on-the-way).
 
 ## Library commands
 

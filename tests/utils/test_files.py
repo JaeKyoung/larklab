@@ -4,7 +4,12 @@ import stat
 import pytest
 
 from larklab.utils import files
-from larklab.utils.files import read_json_or, write_text_atomically
+from larklab.utils.files import (
+    LockBusy,
+    exclusive_lock,
+    read_json_or,
+    write_text_atomically,
+)
 
 
 def test_writes_new_files_readable_by_the_owner_and_group(tmp_path):
@@ -62,3 +67,23 @@ def test_json_of_the_wrong_shape_gives_the_default(tmp_path):
 
     assert read_json_or(path, lambda raw: raw["key"], default="d", what="x") == "d"
     assert read_json_or(path, lambda raw: sum(raw), default=0, what="x") == 3
+
+
+def test_a_held_lock_turns_a_second_holder_away_until_it_is_released(tmp_path):
+    path = tmp_path / "run.lock"
+
+    with exclusive_lock(path), pytest.raises(LockBusy), exclusive_lock(path):
+        pass
+
+    with exclusive_lock(path):  # free again
+        pass
+
+
+def test_a_lock_is_released_when_the_block_fails(tmp_path):
+    path = tmp_path / "run.lock"
+
+    with pytest.raises(RuntimeError), exclusive_lock(path):
+        raise RuntimeError("boom")
+
+    with exclusive_lock(path):
+        pass
