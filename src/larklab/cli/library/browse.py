@@ -54,8 +54,8 @@ def search_paper(query, journal):
 
     if similar:
         click.echo(f"=== similar papers (top {len(similar)}) ===\n")
-        for paper, distance in similar:
-            print_paper_entry(paper, similarity=1 - distance)
+        for paper, similarity in similar:
+            print_paper_entry(paper, similarity=similarity)
 
     if not keyword_matches and not similar:
         click.echo("No matches found.")

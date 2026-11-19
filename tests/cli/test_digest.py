@@ -8,6 +8,7 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from builders import scholar_paper
 from click.testing import CliRunner
 
 from larklab.models import ScholarPaper
@@ -17,10 +18,8 @@ digest_cli = importlib.import_module("larklab.cli.digest")
 
 
 def _paper(title: str, email_id: str = "m1", day: int = 16) -> ScholarPaper:
-    return ScholarPaper(
-        title=title,
-        authors=["Doe, Jane"],
-        journal="Nature",
+    return scholar_paper(
+        title,
         abstract="snippet",
         url=f"https://doi.org/10.1000/{title.lower()}",
         source_email_id=email_id,

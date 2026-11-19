@@ -7,12 +7,14 @@ from typing import Self
 
 import sqlite_vec
 
-from larklab.library.embedder import EMBED_DIM
 from larklab.models import Paper
 
+# Matryoshka truncation of the embedding model's native 4096 dimensions; the table
+# below is created with it, and the embedder cuts its vectors to it.
+EMBED_DIM = 1024
 _PAPER_COLUMNS = "(title, authors, journal, abstract, doi)"
 _PAPER_PLACEHOLDERS = "(?, ?, ?, ?, ?)"
-_DUPLICATE_DISTANCE = 0.2  # cosine distance below this = probably the same paper
+_DUPLICATE_SIMILARITY = 0.8  # cosine similarity above this = probably the same paper
 _DUPLICATE_CANDIDATES = 10
 
 
@@ -68,7 +70,7 @@ class PaperRepository:
     def search_similar(
         self, embedding: list[float], limit: int = 5
     ) -> list[tuple[Paper, float]]:
-        """Closest papers as (paper, cosine distance), nearest first."""
+        """Closest papers as (paper, cosine similarity), most similar first."""
         rows = self._db.execute(
             """SELECT p.*, v.distance
                FROM papers_vec v
@@ -78,7 +80,7 @@ class PaperRepository:
                ORDER BY v.distance""",
             (json.dumps(embedding), limit),
         ).fetchall()
-        return [(_row_to_paper(row), row["distance"]) for row in rows]
+        return [(_row_to_paper(row), 1 - row["distance"]) for row in rows]
 
     def find_duplicates(self, paper: Paper) -> list[tuple[Paper, float]]:
         """Existing papers that look like `paper`, as (paper, similarity score).
@@ -92,9 +94,9 @@ class PaperRepository:
             return []
         candidates = self.search_similar(paper.embedding, limit=_DUPLICATE_CANDIDATES)
         return [
-            (existing, 1 - distance)
-            for existing, distance in candidates
-            if distance < _DUPLICATE_DISTANCE
+            (existing, similarity)
+            for existing, similarity in candidates
+            if similarity > _DUPLICATE_SIMILARITY
         ]
 
     # --- writes ------------------------------------------------------------

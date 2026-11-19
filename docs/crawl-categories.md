@@ -1,6 +1,6 @@
 # Crawl Categories Reference
 
-Categories available for paper crawling from arXiv and bioRxiv.
+Categories available for paper crawling from arXiv and bioRxiv, and the journal filter of PubMed.
 
 ## Recommended (default)
 
@@ -23,6 +23,15 @@ Focused on protein structure/design and AI methods for biology.
 | Biophysics | Protein structure, dynamics |
 | Molecular Biology | Protein function, interactions |
 | Synthetic Biology | Protein/pathway engineering |
+
+### PubMed
+No default: without `--categories` every journal is read (about 3000 to 6000 papers with an abstract a day), preprints left out: PubMed adds bioRxiv, medRxiv and arXiv copies weeks late in batches, and they come from their own sources on time. To narrow it, pass journal names or abbreviations. An exact title or abbreviation matches itself; any other spelling (`Protein science`) is mapped to its journal by PubMed, and a name PubMed cannot place is warned about and left out:
+
+```bash
+pixi run recommend pubmed -c "Protein science,Bioinformatics,Chemical Science"
+```
+
+Journals worth trying, with the papers they added in a week (November 2026): Bioinformatics (21), Chemical Science (27), J Chem Theory Comput (47), J Chem Inf Model (36), Nucleic Acids Res (50), Brief Bioinform (19), Protein Sci (17), PLoS Comput Biol (11), Nat Methods (6).
 
 ---
 

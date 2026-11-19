@@ -3,11 +3,11 @@
 from datetime import UTC, date, datetime
 
 import pytest
+from builders import recommendation, scholar_paper
 from slack_sdk.errors import SlackApiError
 
 from larklab.models import (
     DailyDigest,
-    Paper,
     Recommendation,
     RecommendationResult,
     ScholarPaper,
@@ -148,15 +148,12 @@ def test_gives_up_after_three_rate_limits(sleeps):
 
 
 def _scholar_paper(title: str) -> ScholarPaper:
-    return ScholarPaper(
-        title=title,
+    return scholar_paper(
+        title,
         authors=["A"],
-        journal="Nature",
         abstract="Full abstract.",
         url="https://doi.org/10.1/x",
-        source_email_id="m",
         received_at=None,
-        summary="",
     )
 
 
@@ -198,15 +195,7 @@ def test_digest_whose_headline_failed_is_not_reported_as_sent(monkeypatch):
 
 
 def _recommendation(title: str, day: int) -> Recommendation:
-    paper = Paper(
-        title=title,
-        authors=["A"],
-        journal="arXiv",
-        abstract="abs",
-        doi=f"10.48550/arXiv.{title}",
-        published_at=datetime(2026, 11, day, 12, tzinfo=UTC),
-    )
-    return Recommendation(paper=paper, similar_papers=[("Ref", 0.8)])
+    return recommendation(title, published_at=datetime(2026, 11, day, 12, tzinfo=UTC))
 
 
 def _result(*recommendations: Recommendation) -> RecommendationResult:

@@ -42,6 +42,6 @@ def test_edit_updates_fields_and_refreshes_the_embedding(
     assert result.exit_code == 0, result.output
     edited = repository.get_by_id(1)
     assert (edited.title, edited.authors) == ("New", ["A", "B"])
-    nearest, distance = repository.search_similar(one_hot(0), limit=1)[0]
+    nearest, similarity = repository.search_similar(one_hot(0), limit=1)[0]
     assert nearest.id == 1  # re-embedded: `embed_paper` is stubbed to one_hot(0)
-    assert distance == pytest.approx(0.0, abs=1e-6)
+    assert similarity == pytest.approx(1.0, abs=1e-6)

@@ -7,6 +7,9 @@ from typing import Self
 
 SimilarPapers = list[tuple[str, float]]  # [(reference title, similarity score)]
 _METADATA_FIELDS = ("title", "authors", "journal", "abstract")
+# PubMed papers name their journal in the source (`pubmed:Chem Sci`): one source per
+# journal, so the recommendation headline lists only those that have a recommendation.
+JOURNAL_SOURCE_PREFIX = "pubmed:"
 
 
 @dataclass
@@ -37,6 +40,7 @@ class Paper:
     id: int | None = None
     embedding: list[float] | None = None
     published_at: datetime | None = None
+    source: str = ""  # who found it: arxiv, biorxiv or pubmed:<journal>
 
     @classmethod
     def empty(cls, doi: str = "") -> Self:
@@ -46,11 +50,6 @@ class Paper:
     @property
     def url(self) -> str:
         return f"https://doi.org/{self.doi}"
-
-    @property
-    def source(self) -> str:
-        """Lower-case server a crawled paper came from: `arxiv` or `biorxiv`."""
-        return self.journal.lower()
 
     def missing_metadata(self) -> list[str]:
         """Names of the metadata fields (title, authors, journal, abstract) that are
@@ -84,12 +83,23 @@ class Recommendation:
 
 
 @dataclass
+class SourceProgress:
+    """How far one source has been read; saved between runs."""
+
+    newest: datetime  # time of the newest paper already handled: the resume point
+    # DOI -> paper time, for the stretch the next run reads again. A source that can
+    # announce a paper after newer ones (arXiv) is read a little further back each
+    # time, and these papers must not be recommended twice.
+    seen: dict[str, datetime] = field(default_factory=dict)
+
+
+@dataclass
 class RecommendationResult:
     recommendations: list[Recommendation]
     # publication date -> source -> number of candidates scored (before thresholding)
     candidate_counts: dict[date | None, dict[str, int]]
-    # source -> publication time of the newest paper crawled (the resume point)
-    newest_published: dict[str, datetime] = field(default_factory=dict)
+    # source -> what to save once the recommendations were delivered
+    progress: dict[str, SourceProgress] = field(default_factory=dict)
 
     def by_date(self) -> dict[date | None, list[Recommendation]]:
         """Recommendations grouped by publication date, newest date first."""
@@ -113,7 +123,9 @@ class RecommendationResult:
         for source, count in recommended.items():
             totals[source] = max(totals.get(source, 0), count)
         return [
-            (source, recommended[source], total) for source, total in totals.items()
+            (source, recommended[source], total)
+            for source, total in totals.items()
+            if recommended[source] or not source.startswith(JOURNAL_SOURCE_PREFIX)
         ]
 
 

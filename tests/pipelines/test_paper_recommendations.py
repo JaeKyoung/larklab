@@ -1,7 +1,16 @@
-from datetime import UTC, date, datetime
+import threading
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
-from larklab.models import CrawlResult, Paper
+import pytest
+
+from larklab.models import (
+    CrawlResult,
+    Paper,
+    Recommendation,
+    RecommendationResult,
+    SourceProgress,
+)
 from larklab.pipelines import paper_recommendations as pipeline
 from larklab.pipelines.paper_recommendations import recommend_papers
 
@@ -9,19 +18,21 @@ from larklab.pipelines.paper_recommendations import recommend_papers
 def _crawled(
     title: str,
     doi: str,
-    source: str = "arXiv",
+    journal: str = "arXiv",
     day: date | None = date(2026, 11, 15),
     hour: int = 0,
+    source: str = "",
 ) -> Paper:
     return Paper(
         title=title,
         authors=["A"],
-        journal=source,
+        journal=journal,
         abstract="abstract",
         doi=doi,
         published_at=datetime(day.year, day.month, day.day, hour, tzinfo=UTC)
         if day
         else None,
+        source=source,
     )
 
 
@@ -88,7 +99,7 @@ def test_recommendations_respect_top_n_and_group_by_date(
     _fake_crawlers(
         monkeypatch,
         arxiv=[_crawled("Old", "10.48550/arXiv.1", day=date(2026, 11, 14))],
-        biorxiv=[_crawled("New", "10.64898/2", source="bioRxiv")],
+        biorxiv=[_crawled("New", "10.64898/2", journal="bioRxiv")],
     )
     _score_by_title(monkeypatch, {"Old": 0.9, "New": 0.8})
 
@@ -129,12 +140,74 @@ def test_by_date_orders_newest_first_with_unknown_dates_last(
 
 
 def test_each_source_resumes_from_its_own_progress(repository, monkeypatch):
-    seen_since = _fake_crawlers(monkeypatch, arxiv=[], biorxiv=[])
-    arxiv_mark = datetime(2026, 11, 13, 18, 59, tzinfo=UTC)
+    seen_since = _fake_crawlers(monkeypatch, arxiv=[], biorxiv=[], pubmed=[])
+    mark = datetime(2026, 11, 13, 18, 59, tzinfo=UTC)
 
-    _recommend(repository, sources=("arxiv", "biorxiv"), since={"arxiv": arxiv_mark})
+    _recommend(
+        repository,
+        sources=("arxiv", "biorxiv", "pubmed"),
+        progress={"biorxiv": SourceProgress(mark), "arxiv": SourceProgress(mark)},
+    )
 
-    assert seen_since == {"arxiv": arxiv_mark, "biorxiv": None}
+    assert seen_since == {
+        "arxiv": mark - timedelta(days=2),  # arXiv is read a little further back
+        "biorxiv": mark,
+        "pubmed": None,  # nothing saved yet: the first run
+    }
+
+
+def test_a_paper_announced_late_is_recommended_but_one_seen_before_is_not(
+    repository, make_paper, one_hot, monkeypatch
+):
+    """arXiv can list a paper after newer ones; the overlap lets it through once."""
+    repository.add(make_paper("Reference", embedding=one_hot(0)))
+    mark = datetime(2026, 11, 13, 18, tzinfo=UTC)
+    earlier = SourceProgress(
+        mark, seen={"10.48550/arxiv.1": datetime(2026, 11, 13, 9, tzinfo=UTC)}
+    )
+    _fake_crawlers(
+        monkeypatch,
+        arxiv=[
+            _crawled("Seen before", "10.48550/arXiv.1", day=date(2026, 11, 13), hour=9),
+            _crawled(
+                "Held, now listed", "10.48550/arXiv.2", day=date(2026, 11, 12), hour=20
+            ),
+        ],
+    )
+    _score_by_title(monkeypatch, {"Seen before": 0.9, "Held, now listed": 0.9})
+
+    result = _recommend(repository, sources=("arxiv",), progress={"arxiv": earlier})
+
+    assert [r.paper.title for r in result.recommendations] == ["Held, now listed"]
+
+
+def test_progress_keeps_only_the_papers_of_the_stretch_the_next_run_reads_again(
+    repository, make_paper, one_hot, monkeypatch
+):
+    repository.add(make_paper("Reference", embedding=one_hot(0)))
+    old = SourceProgress(
+        datetime(2026, 11, 10, tzinfo=UTC),
+        seen={"10.48550/arxiv.old": datetime(2026, 11, 8, 12, tzinfo=UTC)},
+    )
+    _fake_crawlers(
+        monkeypatch,
+        arxiv=[_crawled("Fresh", "10.48550/arXiv.9", day=date(2026, 11, 14), hour=12)],
+        biorxiv=[
+            _crawled("Day", "10.64898/9", journal="bioRxiv", day=date(2026, 11, 14))
+        ],
+    )
+    _score_by_title(monkeypatch, {"Fresh": 0.9, "Day": 0.9})
+
+    result = _recommend(
+        repository, sources=("arxiv", "biorxiv"), progress={"arxiv": old}
+    )
+
+    newest = datetime(2026, 11, 14, 12, tzinfo=UTC)
+    assert result.progress["arxiv"] == SourceProgress(
+        newest,
+        seen={"10.48550/arxiv.9": newest},  # the Nov 8 paper is out of reach
+    )
+    assert result.progress["biorxiv"].seen == {}  # read by whole days: no overlap
 
 
 def test_result_reports_the_newest_paper_per_source_even_when_nothing_qualifies(
@@ -155,7 +228,8 @@ def test_result_reports_the_newest_paper_per_source_even_when_nothing_qualifies(
     result = _recommend(repository, sources=("arxiv", "biorxiv"))
 
     assert result.recommendations == []
-    assert result.newest_published == {
+    newest = {source: p.newest for source, p in result.progress.items()}
+    assert newest == {
         "arxiv": datetime(2026, 11, 13, 18, tzinfo=UTC)
     }  # biorxiv found nothing, so it has no resume point
 
@@ -167,20 +241,148 @@ def test_papers_that_could_not_be_scored_are_not_marked_as_handled(
     resume point would hide those papers for good once the library is ready."""
     _fake_crawlers(monkeypatch, arxiv=[_crawled("Anything", "10.48550/arXiv.1")])
 
-    assert _recommend(repository).newest_published == {}  # empty library
+    assert _recommend(repository).progress == {}  # empty library
 
     repository.add(make_paper("Reference", embedding=one_hot(0)))
     monkeypatch.setattr(
         pipeline, "find_similar_references", lambda papers, repo: [[] for _ in papers]
     )
 
-    assert _recommend(repository).newest_published == {}  # nothing could be scored
+    assert _recommend(repository).progress == {}  # nothing could be scored
+
+
+def test_every_paper_remembers_which_source_found_it(
+    repository, make_paper, one_hot, monkeypatch
+):
+    """The crawler decides: `arxiv`, `biorxiv`, or `pubmed:<journal>` for PubMed."""
+    repository.add(make_paper("Reference", embedding=one_hot(0)))
+    named = _crawled(
+        "From PubMed", "10.1/p1", journal="Cell Systems", source="pubmed:Cell Syst"
+    )
+    _fake_crawlers(
+        monkeypatch,
+        arxiv=[_crawled("From arXiv", "10.48550/arXiv.1")],
+        pubmed=[named, _crawled("PubMed, unnamed", "10.1/p2", journal="Cell Systems")],
+    )
+    _score_by_title(
+        monkeypatch, {"From arXiv": 0.9, "From PubMed": 0.8, "PubMed, unnamed": 0.7}
+    )
+
+    result = _recommend(repository, sources=("arxiv", "pubmed"))
+
+    assert {r.paper.title: r.paper.source for r in result.recommendations} == {
+        "From arXiv": "arxiv",
+        "From PubMed": "pubmed:Cell Syst",  # the crawler's own, more exact name wins
+        "PubMed, unnamed": "pubmed",
+    }
+
+
+def test_the_headline_lists_only_pubmed_journals_that_have_a_recommendation(
+    make_paper,
+):
+    """PubMed has one source per journal, hundreds a day; arXiv/bioRxiv always show."""
+    day = date(2026, 11, 15)
+    when = datetime(2026, 11, 15, tzinfo=UTC)
+
+    def recommended(title, source):
+        paper = make_paper(title, published_at=when, source=source)
+        return Recommendation(paper, [("Reference", 0.8)])
+
+    result = RecommendationResult(
+        recommendations=[recommended("kept", "pubmed:Bioinformatics")],
+        candidate_counts={
+            day: {
+                "arxiv": 40,
+                "pubmed:Bioinformatics": 21,
+                "pubmed:Chem Sci": 27,  # candidates, but nothing recommended
+            }
+        },
+    )
+
+    assert result.source_counts(day) == [
+        ("arxiv", 0, 40),
+        ("pubmed:Bioinformatics", 1, 21),
+    ]
+
+
+def test_a_paper_two_sources_both_return_is_scored_once_under_the_first(
+    repository, make_paper, one_hot, monkeypatch
+):
+    """PubMed indexes bioRxiv preprints: the same DOI arrives from both crawlers."""
+    repository.add(make_paper("Reference", embedding=one_hot(0)))
+    _fake_crawlers(
+        monkeypatch,
+        biorxiv=[_crawled("Same Preprint", "10.1101/abc", journal="bioRxiv")],
+        pubmed=[
+            _crawled(
+                "Same Preprint",
+                "10.1101/ABC",
+                journal="bioRxiv",
+                source="pubmed:bioRxiv",
+            )
+        ],
+    )
+    _score_by_title(monkeypatch, {"Same Preprint": 0.9})
+
+    result = _recommend(repository, sources=("biorxiv", "pubmed"))
+
+    [recommendation] = result.recommendations
+    assert recommendation.paper.source == "biorxiv"  # the first source keeps it
+    assert result.candidate_counts[date(2026, 11, 15)] == {"biorxiv": 1}
+
+
+def test_the_sources_are_read_at_the_same_time(repository, monkeypatch):
+    """Each crawler waits for the other: it only gets through if they overlap."""
+    both_running = threading.Barrier(2, timeout=5)
+
+    def crawler(papers):
+        def crawl_recent(categories, days_back, since=None):
+            both_running.wait()  # would time out if the sources were read one by one
+            return CrawlResult(papers)
+
+        return SimpleNamespace(DEFAULT_CATEGORIES=["cat"], crawl_recent=crawl_recent)
+
+    monkeypatch.setattr(
+        pipeline,
+        "_CRAWLERS",
+        {"arxiv": crawler([]), "biorxiv": crawler([])},
+    )
+
+    result = _recommend(repository, sources=("arxiv", "biorxiv"))
+
+    assert result.recommendations == []  # reached the end without a BrokenBarrierError
+
+
+def test_a_failing_source_still_fails_the_run(repository, monkeypatch):
+    def broken(categories, days_back, since=None):
+        raise RuntimeError("arXiv exploded")
+
+    crawler = SimpleNamespace(DEFAULT_CATEGORIES=["cat"], crawl_recent=broken)
+    monkeypatch.setattr(pipeline, "_CRAWLERS", {"arxiv": crawler})
+
+    with pytest.raises(RuntimeError, match="arXiv exploded"):
+        _recommend(repository, sources=("arxiv",))
+
+
+def test_a_source_named_twice_is_crawled_once(repository, monkeypatch):
+    reads = []
+
+    def crawl_recent(categories, days_back, since=None):
+        reads.append(1)
+        return CrawlResult([])
+
+    crawler = SimpleNamespace(DEFAULT_CATEGORIES=["cat"], crawl_recent=crawl_recent)
+    monkeypatch.setattr(pipeline, "_CRAWLERS", {"arxiv": crawler})
+
+    _recommend(repository, sources=("arxiv", "arxiv"))
+
+    assert len(reads) == 1
 
 
 def test_no_crawled_papers_means_no_progress_to_save(repository, monkeypatch):
     _fake_crawlers(monkeypatch, arxiv=[])
 
-    assert _recommend(repository).newest_published == {}
+    assert _recommend(repository).progress == {}
 
 
 def test_a_source_that_could_not_be_read_completely_keeps_its_old_resume_point(
@@ -193,7 +395,7 @@ def test_a_source_that_could_not_be_read_completely_keeps_its_old_resume_point(
         incomplete=("arxiv",),
         arxiv=[_crawled("Half read", "10.48550/arXiv.1", day=date(2026, 11, 13))],
         biorxiv=[
-            _crawled("Whole", "10.64898/2", source="bioRxiv", day=date(2026, 11, 13))
+            _crawled("Whole", "10.64898/2", journal="bioRxiv", day=date(2026, 11, 13))
         ],
     )
     _score_by_title(monkeypatch, {"Half read": 0.9, "Whole": 0.9})
@@ -201,4 +403,4 @@ def test_a_source_that_could_not_be_read_completely_keeps_its_old_resume_point(
     result = _recommend(repository, sources=("arxiv", "biorxiv"))
 
     assert {r.paper.title for r in result.recommendations} == {"Half read", "Whole"}
-    assert list(result.newest_published) == ["biorxiv"]  # arxiv is left out
+    assert list(result.progress) == ["biorxiv"]  # arxiv is left out

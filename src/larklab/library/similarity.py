@@ -18,8 +18,8 @@ def find_similar_references(
     """
     return [
         [
-            (reference.title, 1 - distance)
-            for reference, distance in repository.search_similar(
+            (reference.title, similarity)
+            for reference, similarity in repository.search_similar(
                 embedding, limit=_TOP_K
             )
         ]

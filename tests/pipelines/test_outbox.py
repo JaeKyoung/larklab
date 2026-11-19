@@ -1,7 +1,9 @@
 import json
 from datetime import UTC, datetime, timedelta
 
-from larklab.models import Paper, Recommendation
+from builders import recommendation
+
+from larklab.models import Recommendation
 from larklab.pipelines.outbox import (
     load_outbox,
     merge_recommendations,
@@ -15,15 +17,7 @@ def _recommendation(
     published = (
         datetime.now(UTC) - timedelta(days=age_days) if age_days is not None else None
     )
-    paper = Paper(
-        title=title,
-        authors=["Doe, Jane"],
-        journal="arXiv",
-        abstract="abstract",
-        doi=f"10.48550/arXiv.{title}",
-        published_at=published,
-    )
-    return Recommendation(paper=paper, similar_papers=[("Reference", score)])
+    return recommendation(title, score, authors=["Doe, Jane"], published_at=published)
 
 
 def test_nothing_waiting_when_there_is_no_file(tmp_path):

@@ -1,22 +1,102 @@
-"""Recommendation pipeline: crawl preprint servers, score against the library, rank.
+"""Recommendation pipeline: crawl the paper sources, score against the library, rank,
+deliver, and remember how far each source was read.
 
 Pure orchestration like the digest pipeline, so a future bot can reuse it.
 """
 
 import logging
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from larklab.library.repository import PaperRepository
 from larklab.library.similarity import find_similar_references
-from larklab.models import CrawlResult, Paper, Recommendation, RecommendationResult
-from larklab.sources.papers import arxiv_source, biorxiv_source
+from larklab.models import (
+    CrawlResult,
+    Paper,
+    Recommendation,
+    RecommendationResult,
+    SourceProgress,
+)
+from larklab.pipelines.crawl_progress import advance_progress, load_progress
+from larklab.pipelines.outbox import load_outbox, merge_recommendations, save_outbox
+from larklab.sources.papers import arxiv_source, biorxiv_source, pubmed_source
 from larklab.utils.text import normalize_title
 
 logger = logging.getLogger(__name__)
 
-_CRAWLERS = {"arxiv": arxiv_source, "biorxiv": biorxiv_source}
+_CRAWLERS = {"arxiv": arxiv_source, "biorxiv": biorxiv_source, "pubmed": pubmed_source}
 RECOMMEND_SOURCES = tuple(_CRAWLERS)
+# arXiv can announce a paper after newer ones (one held for moderation), so each run
+# reads this far back from where the last one stopped and skips what it has seen.
+_OVERLAP = {"arxiv": timedelta(days=2)}
+
+# Posts a result and returns the recommendations it could not post.
+Send = Callable[[RecommendationResult], list[Recommendation]]
+
+
+@dataclass
+class RecommendationRun:
+    shown: RecommendationResult  # the waiting recommendations plus the new ones
+    undelivered: list[Recommendation]  # refused by `send`; already kept in the outbox
+
+
+def run_recommendations(
+    repository: PaperRepository,
+    *,
+    sources: list[str],
+    categories: list[str] | None,
+    days_back: int,
+    top_n: int,
+    threshold: float,
+    progress_path: Path,
+    outbox_path: Path,
+    send: Send | None,
+) -> RecommendationRun:
+    """Read the sources, deliver the recommendations, and remember — in an order
+    that loses nothing.
+
+    Recommendations Slack refused earlier go out together with the new ones. What
+    `send` could not post is saved to the outbox *before* the resume points move, so
+    a crash can only cause a repeat, never a gap. `send=None` is a dry run: nothing
+    is sent and nothing is saved.
+    """
+    result = recommend_papers(
+        repository,
+        sources=sources,
+        categories=categories,
+        days_back=days_back,
+        top_n=top_n,
+        threshold=threshold,
+        progress=load_progress(progress_path),
+    )
+    waiting = _still_unknown(load_outbox(outbox_path), repository)
+    shown = replace(
+        result,
+        recommendations=merge_recommendations(waiting, result.recommendations),
+    )
+    if send is None:
+        return RecommendationRun(shown, [])
+
+    undelivered = send(shown) if shown.recommendations else []
+    save_outbox(outbox_path, undelivered)
+    advance_progress(progress_path, result.progress)
+    return RecommendationRun(shown, undelivered)
+
+
+def _still_unknown(
+    waiting: list[Recommendation], repository: PaperRepository
+) -> list[Recommendation]:
+    """The waiting recommendations of papers that are still not in the library: one
+    may have been added since it was queued."""
+    unknown = {
+        id(paper)
+        for paper in _exclude_library_papers([r.paper for r in waiting], repository)
+    }
+    return [r for r in waiting if id(r.paper) in unknown]
 
 
 def recommend_papers(
@@ -27,19 +107,20 @@ def recommend_papers(
     days_back: int,
     top_n: int,
     threshold: float,
-    since: dict[str, datetime] | None = None,
+    progress: dict[str, SourceProgress] | None = None,
 ) -> RecommendationResult:
     """Crawl `sources`, drop papers already in the library, and return the
     `top_n` most similar to the library with similarity ≥ `threshold`.
 
-    `since` maps a source to the newest paper time already handled; each source
-    resumes after it (see `crawl_progress`). The result's `newest_published`
-    is what to save once the recommendations were delivered; a source that could
-    not be read completely is left out so its papers are fetched again.
+    `progress` says how far each source was read (see `crawl_progress`); each source
+    resumes there. The result's `progress` is what to save once the recommendations
+    were delivered; a source that could not be read completely is left out so its
+    papers are fetched again.
     """
-    crawled_by_source = _crawl(sources, categories, days_back, since or {})
-    crawled = [paper for crawl in crawled_by_source.values() for paper in crawl.papers]
-    newest_published = _newest_published(crawled_by_source)
+    previous = progress or {}
+    crawled_by_source = _crawl(sources, categories, days_back, previous)
+    crawled = _one_per_paper(_not_seen(crawled_by_source, previous))
+    next_progress = _next_progress(crawled_by_source, previous)
 
     def result(
         recommendations=(), candidate_counts=None, *, scored=True
@@ -49,7 +130,7 @@ def recommend_papers(
             candidate_counts=candidate_counts or {},
             # Papers that were never scored must come back next time, e.g. once
             # reference papers were added or the embeddings were rebuilt.
-            newest_published=newest_published if scored else {},
+            progress=next_progress if scored else {},
         )
 
     if not crawled:
@@ -94,22 +175,18 @@ def _crawl(
     sources: list[str],
     categories: list[str] | None,
     days_back: int,
-    since: dict[str, datetime],
+    previous: dict[str, SourceProgress],
 ) -> dict[str, CrawlResult]:
-    crawled: dict[str, CrawlResult] = {}
-    for source in sources:
-        crawler = _CRAWLERS[source]
-        shown_categories = categories or crawler.DEFAULT_CATEGORIES
-        logger.info("Crawling %s (%s)...", source, ", ".join(shown_categories))
-        crawled[source] = crawler.crawl_recent(
-            categories, days_back, since=since.get(source)
-        )
-        if not crawled[source].complete:
-            logger.warning(
-                "Could not read all of %s; its progress will not move, so the next "
-                "run tries again.",
-                source,
+    names = list(dict.fromkeys(sources))  # a source named twice is read once
+    # Different servers: read them together, the slowest one sets the time.
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        futures = {
+            name: pool.submit(
+                _crawl_one, name, categories, days_back, previous.get(name)
             )
+            for name in names
+        }
+        crawled = {name: future.result() for name, future in futures.items()}
 
     total = sum(len(crawl.papers) for crawl in crawled.values())
     if total:
@@ -118,16 +195,75 @@ def _crawl(
     return crawled
 
 
-def _newest_published(crawled: dict[str, CrawlResult]) -> dict[str, datetime]:
-    """Publication time of the newest crawled paper per source.
+def _crawl_one(
+    source: str,
+    categories: list[str] | None,
+    days_back: int,
+    previous: SourceProgress | None,
+) -> CrawlResult:
+    crawler = _CRAWLERS[source]
+    shown_categories = categories or crawler.DEFAULT_CATEGORIES
+    logger.info(
+        "Crawling %s (%s)...", source, ", ".join(shown_categories) or "everything"
+    )
+    since = previous.newest - _OVERLAP.get(source, timedelta()) if previous else None
+    crawl = crawler.crawl_recent(categories, days_back, since=since)
+    for paper in crawl.papers:
+        paper.source = paper.source or source  # PubMed names the journal too
+    if not crawl.complete:
+        logger.warning(
+            "Could not read all of %s; its progress will not move, so the next "
+            "run tries again.",
+            source,
+        )
+    return crawl
 
-    Sources that returned nothing, or could not be read completely, are omitted.
-    """
-    return {
-        source: max(p.published_at for p in crawl.papers if p.published_at)
-        for source, crawl in crawled.items()
-        if crawl.complete and any(p.published_at for p in crawl.papers)
-    }
+
+def _not_seen(
+    crawled: dict[str, CrawlResult], previous: dict[str, SourceProgress]
+) -> list[Paper]:
+    """The crawled papers an earlier run has not handled yet."""
+    papers = []
+    for source, crawl in crawled.items():
+        seen = previous[source].seen if source in previous else {}
+        papers += [paper for paper in crawl.papers if paper.doi.lower() not in seen]
+    return papers
+
+
+def _next_progress(
+    crawled: dict[str, CrawlResult], previous: dict[str, SourceProgress]
+) -> dict[str, SourceProgress]:
+    """What to save once the recommendations were delivered: per source the time of
+    the newest paper crawled and, for sources that are read again from a little way
+    back, the papers of that stretch. A source that returned nothing, or could not be
+    read completely, is left out so it is read again from the old point."""
+    updates = {}
+    for source, crawl in crawled.items():
+        dated = [paper for paper in crawl.papers if paper.published_at]
+        if not (crawl.complete and dated):
+            continue
+        newest = max(paper.published_at for paper in dated)
+        seen: dict[str, datetime] = {}
+        if source in _OVERLAP:
+            from_here = newest - _OVERLAP[source]
+            before = previous[source].seen if source in previous else {}
+            seen = {doi: at for doi, at in before.items() if at > from_here}
+            seen |= {
+                paper.doi.lower(): paper.published_at
+                for paper in dated
+                if paper.published_at > from_here
+            }
+        updates[source] = SourceProgress(newest, seen)
+    return updates
+
+
+def _one_per_paper(papers: list[Paper]) -> list[Paper]:
+    """Two sources can return the same paper (PubMed indexes bioRxiv preprints):
+    keep the first, so it is scored, counted and labelled once."""
+    unique: dict[str, Paper] = {}
+    for paper in papers:
+        unique.setdefault(paper.doi.lower() or normalize_title(paper.title), paper)
+    return list(unique.values())
 
 
 def _exclude_library_papers(

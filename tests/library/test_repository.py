@@ -27,15 +27,15 @@ def test_titles_are_unique(repository, make_paper):
     assert repository.count() == 1
 
 
-def test_search_similar_orders_by_cosine_distance(repository, make_paper, one_hot):
+def test_search_similar_orders_by_cosine_similarity(repository, make_paper, one_hot):
     repository.add(make_paper("Near", embedding=one_hot(0)))
     repository.add(make_paper("Far", embedding=one_hot(1)))
 
     results = repository.search_similar(one_hot(0), limit=2)
 
     assert [paper.title for paper, _ in results] == ["Near", "Far"]
-    assert results[0][1] == pytest.approx(0.0, abs=1e-6)
-    assert results[1][1] == pytest.approx(1.0, abs=1e-6)
+    assert results[0][1] == pytest.approx(1.0, abs=1e-6)  # the same direction
+    assert results[1][1] == pytest.approx(0.0, abs=1e-6)  # orthogonal
 
 
 def test_find_duplicates_by_title_and_by_embedding(repository, make_paper, one_hot):

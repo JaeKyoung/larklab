@@ -45,7 +45,7 @@ PYTHONDONTWRITEBYTECODE = "1"
 
 [tool.pixi.tasks]
 digest = { cmd = "larklab digest", description = "Fetch Scholar emails and post the digest" }
-recommend = { cmd = "larklab recommend", description = "Recommend papers from arXiv/bioRxiv" }
+recommend = { cmd = "larklab recommend", description = "Recommend papers from arXiv/bioRxiv/PubMed" }
 db-add = { cmd = "larklab db-add", description = "Add a reference paper by URL or DOI" }
 db-edit = { cmd = "larklab db-edit", description = "Edit fields of an existing paper" }
 db-delete = { cmd = "larklab db-delete", description = "Delete a paper from the database" }
@@ -61,6 +61,7 @@ format = { cmd = "ruff format src tests scripts", description = "Format" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]  # tests/builders.py: shared builders
 
 [tool.ruff]
 target-version = "py312"

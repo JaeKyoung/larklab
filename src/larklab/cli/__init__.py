@@ -1,21 +1,42 @@
+import importlib
 import logging
 import sys
 
 import click
 
-from larklab.cli.digest import digest
-from larklab.cli.library import LIBRARY_COMMANDS
-from larklab.cli.recommend import recommend
+# command name -> where it lives. A command's module is imported only when that
+# command runs: `db-list` need not wait for the Google, Slack and Ollama libraries.
+_COMMANDS = {
+    "digest": "larklab.cli.digest:digest",
+    "recommend": "larklab.cli.recommend:recommend",
+    "db-add": "larklab.cli.library.add:add_paper",
+    "db-edit": "larklab.cli.library.edit:edit_paper",
+    "db-delete": "larklab.cli.library.edit:delete_paper",
+    "db-list": "larklab.cli.library.browse:list_papers",
+    "db-search": "larklab.cli.library.browse:search_paper",
+    "db-check": "larklab.cli.library.health:check_papers",
+    "db-rebuild": "larklab.cli.library.health:rebuild_embeddings",
+    "db-export": "larklab.cli.library.backup:export_papers",
+    "db-import": "larklab.cli.library.backup:import_papers",
+}
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+class _LazyGroup(click.Group):
+    def list_commands(self, ctx):
+        return sorted(_COMMANDS)
+
+    def get_command(self, ctx, name):
+        location = _COMMANDS.get(name)
+        if location is None:
+            return None
+        module, attribute = location.split(":")
+        return getattr(importlib.import_module(module), attribute)
+
+
+@click.group(cls=_LazyGroup, context_settings={"help_option_names": ["-h", "--help"]})
 def cli():
     """LarkLab - Scholar paper digest and management"""
     _show_progress_logs()
-
-
-for _command in (digest, recommend, *LIBRARY_COMMANDS):
-    cli.add_command(_command)
 
 
 def _show_progress_logs() -> None:
