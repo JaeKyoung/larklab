@@ -13,6 +13,7 @@ from larklab.pipelines.paper_recommendations import (
     RECOMMEND_SOURCES,
     run_recommendations,
 )
+from larklab.utils.files import LockBusy
 
 
 @click.command("recommend")
@@ -75,20 +76,27 @@ def recommend(sources, categories, days_back, top_n, channel, threshold, no_slac
             channel=channel,
         )
     )
-    with PaperRepository(config.db_path) as repository:
-        run = run_recommendations(
-            repository,
-            sources=sources,
-            categories=[c.strip() for c in categories.split(",")]
-            if categories
-            else None,
-            days_back=days_back,
-            top_n=top_n,
-            threshold=threshold,
-            progress_path=Path(config.crawl_progress_path),
-            outbox_path=Path(config.outbox_path),
-            send=send,
-        )
+    try:
+        with PaperRepository(config.db_path) as repository:
+            run = run_recommendations(
+                repository,
+                sources=sources,
+                categories=[c.strip() for c in categories.split(",")]
+                if categories
+                else None,
+                days_back=days_back,
+                top_n=top_n,
+                threshold=threshold,
+                progress_path=Path(config.crawl_progress_path),
+                outbox_path=Path(config.outbox_path),
+                send=send,
+            )
+    except LockBusy as error:
+        raise click.ClickException(
+            "Another `recommend` run is still going and owns the saved state "
+            f"({error}). Run it again when that one has finished, or add "
+            "--no-slack to look without saving anything."
+        ) from error
 
     if run.shown.recommendations:
         print_recommendations(run.shown)

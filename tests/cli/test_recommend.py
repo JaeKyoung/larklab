@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from larklab.models import RecommendationResult
 from larklab.pipelines.paper_recommendations import RecommendationRun
+from larklab.utils.files import LockBusy
 
 recommend_cli = importlib.import_module("larklab.cli.recommend")
 
@@ -136,3 +137,16 @@ def test_categories_go_with_a_single_source(invoke):
     assert result.exit_code == 0
     assert seen["options"]["sources"] == ["pubmed"]
     assert seen["options"]["categories"] == ["Protein science", "Bioinformatics"]
+
+
+def test_a_run_that_is_already_going_is_explained_not_a_traceback(invoke, monkeypatch):
+    def locked(repository, **options):
+        raise LockBusy("data/recommend.lock")
+
+    monkeypatch.setattr(recommend_cli, "run_recommendations", locked)
+
+    result, _ = invoke()
+
+    assert result.exit_code == 1
+    assert "Another `recommend` run is still going" in result.output
+    assert "--no-slack" in result.output

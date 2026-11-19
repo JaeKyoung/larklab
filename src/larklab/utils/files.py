@@ -1,14 +1,35 @@
 """File helpers."""
 
+import fcntl
 import json
 import logging
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class LockBusy(Exception):
+    """Another process holds the lock."""
+
+
+@contextmanager
+def exclusive_lock(path: Path) -> Iterator[None]:
+    """Hold an exclusive lock on `path` (created if missing) for the `with` block.
+
+    Raises `LockBusy` at once, instead of waiting, when another process holds it.
+    The lock goes away with the process, so a crash never leaves one behind.
+    """
+    with path.open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise LockBusy(path) from error
+        yield
 
 
 def read_json_or[T](path: Path, parse: Callable[[Any], T], default: T, what: str) -> T:

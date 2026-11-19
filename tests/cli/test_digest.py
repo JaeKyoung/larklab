@@ -144,6 +144,7 @@ def test_emails_of_digests_that_did_not_reach_slack_are_kept(invoke, monkeypatch
 
     assert FakeGmail.last_instance.trashed_ids == ["m1"]  # m2's digest never went out
     assert "Trashed 1 processed emails." in result.output
+    assert "1 digest(s) were not delivered in full" in result.output
 
 
 def test_output_json_has_the_fields_downstream_scripts_expect(invoke, tmp_path):

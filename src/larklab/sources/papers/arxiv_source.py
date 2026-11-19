@@ -29,9 +29,10 @@ _ARXIV_ERRORS = (arxiv.ArxivError, requests.RequestException)
 _PAGE_SIZE = 200
 _REQUEST_DELAY_SECONDS = 10
 _RATE_LIMIT_BACKOFF_SECONDS = 60
-# cs.LG alone gets several hundred papers per announcement (about a thousand after
-# a weekend). Results are newest-first, so a low cap silently drops the older part.
-_MAX_RESULTS_PER_CATEGORY = 1000
+# Results are newest-first, so a cap cuts off the older part. A week's catch-up plus
+# the overlap of two days stays well below this; a category that reaches it anyway
+# makes the crawl incomplete (the resume point stays) instead of skipping papers.
+_MAX_RESULTS_PER_CATEGORY = 3000
 
 # arXiv's API only lists papers that were already *announced* (Sunday to Thursday
 # evening, US Eastern). Seen from Asia at breakfast time the newest paper is one to
@@ -72,7 +73,8 @@ def crawl_recent(
     Without `since` (first run) it looks back `days_back` days plus the
     announcement lag. Each paper is returned once, however many of the requested
     categories it is listed in. The result is marked incomplete when a category
-    could not be read, so the caller does not treat its papers as seen.
+    could not be read, or hit `max_results` before reaching the cutoff (the older
+    papers were not read), so the caller does not treat its papers as seen.
     """
     now = datetime.now(UTC)
     if since:
@@ -92,6 +94,7 @@ def crawl_recent(
     papers: list[Paper] = []
     seen_titles: set[str] = set()
     failed_categories: list[str] = []
+    capped_categories: list[str] = []
     for category in categories or DEFAULT_CATEGORIES:
         search = arxiv.Search(
             query=f"cat:{category}",
@@ -102,15 +105,29 @@ def crawl_recent(
         results = _iter_results_with_backoff(
             client, search, category, failed_categories
         )
+        read = 0
+        reached_cutoff = False
         for result in results:
+            read += 1
             if _as_utc(result.published) <= cutoff:
+                reached_cutoff = True
                 break  # results are newest-first, so everything after is older
             title_key = normalize_title(result.title)
             if title_key in seen_titles:
                 continue
             seen_titles.add(title_key)
             papers.append(paper_from_result(result))
-    return CrawlResult(papers, complete=not failed_categories)
+        if read >= max_results and not reached_cutoff:
+            capped_categories.append(category)
+    if capped_categories:
+        logger.warning(
+            "arXiv cat:%s has %d or more papers since %s; the older ones were not "
+            "read, so the next run tries again.",
+            ", cat:".join(capped_categories),
+            max_results,
+            cutoff.date(),
+        )
+    return CrawlResult(papers, complete=not (failed_categories or capped_categories))
 
 
 def _as_utc(moment: datetime) -> datetime:

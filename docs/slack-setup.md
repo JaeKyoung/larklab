@@ -44,6 +44,18 @@ Create `#journal-club` channel (or your preferred channel), then invite the bot:
 
 To post to a different channel, use `--channel`: `pixi run digest --channel other-channel`
 
+## 6. Discuss papers with an AI assistant (optional)
+
+LarkLab only posts. To ask questions about a paper it posted, add an AI assistant to the channel and mention it in that paper's thread:
+
+- **Claude Tag (Claude in Slack)**: run `/invite @Claude` in the channel (Slack rejects it inside a thread), then write `@Claude explain this paper` in a thread. It reads the thread and answers in place; later replies in that thread need no new mention. See [Use Claude in Slack](https://support.claude.com/en/articles/12461605-use-claude-in-slack).
+- **ChatGPT**: `@ChatGPT` needs a ChatGPT Business, Enterprise or Edu workspace and an admin who has set it up; add it to the channel the same way. See [ChatGPT app in Slack](https://help.openai.com/en/articles/12462158-chatgpt-app-in-slack).
+- **ChatGPT dots**: OpenAI's always-on personal agent, reachable from ChatGPT or Slack. It has its own cloud computer and keeps working between chats; only its owner can direct it, so teammates cannot use yours. Plan and region limits apply, and connecting it to Slack may need a Slack admin's approval. See [Getting started with your dot](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot).
+
+These are separate products with their own plans and admin settings; LarkLab does not call them. The paper's details are in the card, which Slack stores as an attachment; if an assistant answers without them, paste the abstract into the thread. Replies are visible to everyone in the channel.
+
+This is the one place where paper text leaves your machine for a hosted LLM: whatever is in the thread goes to that service. Skip it if that matters.
+
 ## Security
 
 - **Never commit** the bot token to git (`.env` is gitignored)

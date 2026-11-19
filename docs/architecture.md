@@ -130,10 +130,12 @@ arXiv's API lists a paper only after it is *announced* (Sunday to Thursday eveni
 
 Three rules keep papers from disappearing:
 
-1. **A crawl reports whether it read everything** (`CrawlResult.complete`). If an arXiv category failed or the bioRxiv API kept timing out, that source's mark does not move and it is fetched again next time — a repeat is better than a gap.
+1. **A crawl reports how much it read** (`CrawlResult.complete`, and `read_until` for a source that reads day by day). If an arXiv category failed or reached its cap before the cutoff, or the bioRxiv API kept timing out, that source's mark does not move and it is fetched again next time — a repeat is better than a gap. PubMed moves up to the last day read in full even when a later day failed, so the finished days are not embedded again. The mark is the crawl's own `read_until`, never the date shown for a paper (`Paper.published_at` is only the day PubMed added it).
 2. **Undelivered recommendations are queued.** `send_recommendations_to_slack` returns the recommendations it could not post (a failed thread, or individual failed cards). `pipelines/outbox.py` stores them in `data/outbox.json`; the next run posts them together with the new ones, even when nothing new was found, and the file shrinks or disappears as Slack accepts them. Entries older than two weeks are dropped.
 3. **Order of saving:** the outbox file is written first, then the progress mark, so a crash between them can only cause a repeat. This order lives in `run_recommendations` (`pipelines/paper_recommendations.py`), which the command and a future bot both call; it also drops waiting recommendations whose paper was added to the library since. The state file paths come from `Config`.
 4. **Late announcements:** arXiv can list a paper after newer ones (one held for moderation). arXiv is therefore read two days further back than its mark, and `crawl_progress.json` keeps the DOIs of that stretch (`SourceProgress.seen`) so nothing is recommended twice. A paper held for longer than the overlap is still missed.
+5. **A resume point belongs to one reading.** `crawl_progress.json` is keyed by the source and, when the categories or journals are not the defaults, by them too (`pubmed:bioinformatics,chemical science`), so a narrow run and a run over everything never share a mark.
+6. **One saving run at a time.** `run_recommendations` holds `data/recommend.lock` (`utils.files.exclusive_lock`) from reading the state files to writing them. A second saving run raises `LockBusy` (the command prints a message and exits) instead of overwriting the first one's outbox or marks. A dry run takes no lock.
 
 A `--no-slack` run is a dry run (`send=None`): it prints the outbox and the new recommendations and saves nothing. A missing or corrupt state file means "start fresh". bioRxiv publishes whole days, so it resumes at the day after the last one seen.
 
@@ -186,15 +188,23 @@ Gmail reads and trashing go out as batch requests of `BATCH_SIZE` (20) calls eac
 ### Planned
 
 - **Field classification**: auto-categorize papers by research area.
-- **Full paper summarization**: PDF download and text extraction in `sources/`, full-text mode in `processing/summarizer.py`.
+- **Full paper summarization**: PDF download and text extraction in `sources/`, full-text mode in `processing/summarizer.py`. `qwen3:8b` may not have enough context for a whole paper.
 - **Slack bot**: `outputs/slack/bot.py` calling the pipelines for on-demand digests and queries.
 - **Multi-backend summarization**: currently Ollama only (`ollama.chat()`); a provider flag in `processing/summarizer.py` would allow others.
+
+### Adding a metadata source
+
+1. Create `sources/papers/<name>_source.py` exposing `fetch_by_doi(client, doi) -> Paper | None` (return `None` rather than an empty `Paper` when the source does not know the paper).
+2. Register it in `_build_lookups` in `sources/papers/metadata_lookup.py` at the right priority.
+3. Test it with `httpx.MockTransport` (see `tests/sources/papers/test_crossref_source.py`).
 
 ## Known limitations
 
 - **Abstract coverage**: papers not indexed in PubMed and hosted on JavaScript-rendered or bot-protected sites keep the short snippet from the email.
 - **bioRxiv crawl only**: medRxiv is not crawled.
 - **`papers.md` is lossy** (titles and DOIs). `db-import --md` re-fetches metadata over the network and may differ from the original; use `db-export` JSON or the `.db` file for faithful backups.
-- **Two `recommend` runs must not overlap**: they share `crawl_progress.json` and `outbox.json` and there is no lock, so keep the cron times apart (a manual run during the hour-long PubMed run could overwrite the other's marks).
+- **A second saving `recommend` run is turned away** while one is going (see the lock above): a manual run during the hour-long PubMed run exits at once, and its sources are read by the next run. Waiting instead was rejected because a stuck run would pile up processes.
+- **A PubMed day above 10000 papers is read only in part**: one search returns no more. The rest is skipped with a warning, because stopping at that day would keep the crawl from ever getting past it. Narrow it with `-c` (its own resume point) if it matters.
+- **Embeddings are not cached**: a run that fails while embedding (Ollama down) embeds everything again next time, and a `--no-slack` preview costs the same hours as the real run. `-t` and `-n` cut only after embedding.
 - **State files are per checkout**: if you run `recommend` from two checkouts, each keeps its own `data/crawl_progress.json` and `data/outbox.json`.
 - **A source that keeps failing repeats**: if one arXiv category fails every day, the whole arXiv source is re-fetched every day (watch for `arXiv crawl stopped` in the log). Per-category marks would avoid this at the cost of more state.

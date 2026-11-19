@@ -191,6 +191,19 @@ def test_digest_whose_headline_failed_is_not_reported_as_sent(monkeypatch):
     assert slack_digest.send_digest_to_slack([digest], token="xoxb", channel="c") == []
 
 
+def test_digest_with_a_failed_card_is_not_reported_as_sent(monkeypatch):
+    """Regression: a digest whose headline went out counted as delivered, so
+    `--cleanup` trashed the email of a paper that never reached Slack."""
+    slack = FakeSlack(fail_with={"Lost": "invalid_blocks"})
+    monkeypatch.setattr(slack_digest, "WebClient", lambda **kw: slack)
+    digest = DailyDigest(
+        date=date(2026, 11, 16),
+        papers=[_scholar_paper("Posted"), _scholar_paper("Lost")],
+    )
+
+    assert slack_digest.send_digest_to_slack([digest], token="xoxb", channel="c") == []
+
+
 # --- recommendations ----------------------------------------------------------------
 
 

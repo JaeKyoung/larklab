@@ -13,7 +13,9 @@ logger = logging.getLogger(__name__)
 def send_digest_to_slack(
     digests: list[DailyDigest], *, token: str, channel: str
 ) -> list[DailyDigest]:
-    """Post one thread per digest. Returns the digests that were sent."""
+    """Post one thread per digest. Returns the digests that were sent in full: one
+    whose headline or any card failed is not, so its emails can stay in the inbox
+    until a later run posts it again."""
     if not token:
         logger.warning("Slack bot token not configured, skipping Slack output.")
         return []
@@ -45,4 +47,5 @@ def _send_digest(client: WebClient, channel: str, digest: DailyDigest) -> bool:
         )
         for paper in digest.papers
     ]
-    return post_paper_thread(client, channel, headline, cards).started
+    thread = post_paper_thread(client, channel, headline, cards)
+    return thread.started and not thread.failed_indexes

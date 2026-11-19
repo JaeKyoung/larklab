@@ -63,10 +63,16 @@ class Paper:
 
 @dataclass
 class CrawlResult:
-    """Papers a source returned, and whether it could read all of it."""
+    """Papers a source returned, and how much of it was read."""
 
     papers: list[Paper]
     complete: bool = True  # False: part of the source failed, so don't mark it as seen
+    # Set by a source that reads in order, one day at a time (PubMed): everything up
+    # to this moment was read, even when `complete` is False, so the next run resumes
+    # right after it. Without it the resume point is the newest paper of a complete
+    # crawl. It says how far the source was read; `Paper.published_at` only says
+    # when a paper appeared.
+    read_until: datetime | None = None
 
 
 @dataclass
@@ -98,7 +104,8 @@ class RecommendationResult:
     recommendations: list[Recommendation]
     # publication date -> source -> number of candidates scored (before thresholding)
     candidate_counts: dict[date | None, dict[str, int]]
-    # source -> what to save once the recommendations were delivered
+    # progress key (the source, plus the categories read when they are not the
+    # default) -> what to save once the recommendations were delivered
     progress: dict[str, SourceProgress] = field(default_factory=dict)
 
     def by_date(self) -> dict[date | None, list[Recommendation]]:

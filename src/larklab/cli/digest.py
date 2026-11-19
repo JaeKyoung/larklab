@@ -144,3 +144,8 @@ def digest(
         message_ids_to_trash(result, sent_digests), verbose=verbose
     )
     click.echo(f"Trashed {len(trashed)} processed emails.")
+    if len(sent_digests) < len(result.digests):
+        click.echo(
+            f"{len(result.digests) - len(sent_digests)} digest(s) were not delivered "
+            "in full; the emails with their papers stay in the inbox."
+        )
