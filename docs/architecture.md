@@ -190,6 +190,12 @@ Gmail reads and trashing go out as batch requests of `BATCH_SIZE` (20) calls eac
 - **Slack bot**: `outputs/slack/bot.py` calling the pipelines for on-demand digests and queries.
 - **Multi-backend summarization**: currently Ollama only (`ollama.chat()`); a provider flag in `processing/summarizer.py` would allow others.
 
+### Adding a metadata source
+
+1. Create `sources/papers/<name>_source.py` exposing `fetch_by_doi(client, doi) -> Paper | None` (return `None` rather than an empty `Paper` when the source does not know the paper).
+2. Register it in `_build_lookups` in `sources/papers/metadata_lookup.py` at the right priority.
+3. Test it with `httpx.MockTransport` (see `tests/sources/papers/test_crossref_source.py`).
+
 ## Known limitations
 
 - **Abstract coverage**: papers not indexed in PubMed and hosted on JavaScript-rendered or bot-protected sites keep the short snippet from the email.
