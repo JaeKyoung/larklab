@@ -188,7 +188,7 @@ Gmail reads and trashing go out as batch requests of `BATCH_SIZE` (20) calls eac
 ### Planned
 
 - **Field classification**: auto-categorize papers by research area.
-- **Full paper summarization**: PDF download and text extraction in `sources/`, full-text mode in `processing/summarizer.py`.
+- **Full paper summarization**: PDF download and text extraction in `sources/`, full-text mode in `processing/summarizer.py`. `qwen3:8b` may not have enough context for a whole paper.
 - **Slack bot**: `outputs/slack/bot.py` calling the pipelines for on-demand digests and queries.
 - **Multi-backend summarization**: currently Ollama only (`ollama.chat()`); a provider flag in `processing/summarizer.py` would allow others.
 
